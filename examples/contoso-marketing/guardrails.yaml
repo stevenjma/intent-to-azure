@@ -1,0 +1,16 @@
+# Guardrails — policy wins over repo signals when they disagree.
+# Europe-only residency, an approved-model allow-list, and a spend cap.
+regions:
+  - swedencentral
+  - westeurope
+approvedModels:
+  - gpt-4o
+  - gpt-4o-mini
+  - text-embedding-3-large
+budget:
+  monthlyCapUsd: 200
+  onExceed: warn
+skuTier: economy
+notes:
+  - "EU data residency: deploy only to European regions."
+  - "Startup sponsorship — keep SKUs economical and watch burn."

@@ -1,0 +1,55 @@
+{
+  "name": "azx",
+  "version": "0.1.0",
+  "description": "App Intent Service — point at your repo, we figure out what the app needs, Azure runs it. POC #1: an offline dry-run engine that reads an AI-native app repo, emits an open App Intent contract, plans the Azure resource graph, and generates Bicep. No real Azure calls.",
+  "type": "module",
+  "license": "MIT",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    },
+    "./schema": "./app-intent.schema.json"
+  },
+  "bin": {
+    "azx": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "app-intent.schema.json",
+    "SPEC.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "azx": "node dist/src/cli.js",
+    "plan": "node dist/src/cli.js plan",
+    "test": "npm run build && node --test \"dist/test/**/*.test.js\""
+  },
+  "keywords": [
+    "azure",
+    "bicep",
+    "app-intent",
+    "iac",
+    "dry-run",
+    "ai-native",
+    "container-apps",
+    "postgres",
+    "azure-openai"
+  ],
+  "dependencies": {
+    "yaml": "^2.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "ajv": "^8.17.1",
+    "typescript": "^5.6.2"
+  }
+}

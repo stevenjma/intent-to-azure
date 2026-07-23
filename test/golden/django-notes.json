@@ -1,0 +1,215 @@
+{
+  "intent": {
+    "version": "0.1",
+    "app": {
+      "name": "django-notes",
+      "root": "examples/django-notes",
+      "runtime": "python",
+      "language": "python",
+      "framework": "django"
+    },
+    "needs": [
+      {
+        "capability": "web-compute",
+        "confidence": "high",
+        "rationale": "web-compute (Django): 2 independent signals (dependency, framework-file) point at web-compute; corroborated across signal kinds, so it is applied without asking.",
+        "evidence": [
+          "manage.py present",
+          "requirements.txt lists \"django\"",
+          "requirements.txt lists \"gunicorn\""
+        ]
+      },
+      {
+        "capability": "transactional-relational",
+        "confidence": "high",
+        "rationale": "transactional-relational (psycopg2): 3 independent signals (dependency, env, migration) point at transactional-relational; corroborated across signal kinds, so it is applied without asking.",
+        "evidence": [
+          ".env.example sets DATABASE_URL",
+          "1 Django migration file(s)",
+          "requirements.txt lists \"psycopg2-binary\"",
+          "requirements.txt lists \"psycopg2\""
+        ]
+      }
+    ],
+    "signals": [
+      {
+        "kind": "dependency",
+        "signal": "requirements.txt lists \"psycopg2-binary\"",
+        "conclusion": "transactional-relational (psycopg2)",
+        "capability": "transactional-relational",
+        "detail": {},
+        "from": "requirements.txt"
+      },
+      {
+        "kind": "dependency",
+        "signal": "requirements.txt lists \"psycopg2\"",
+        "conclusion": "transactional-relational (psycopg2)",
+        "capability": "transactional-relational",
+        "detail": {},
+        "from": "requirements.txt"
+      },
+      {
+        "kind": "env",
+        "signal": ".env.example sets DATABASE_URL",
+        "conclusion": "transactional-relational (DATABASE_URL)",
+        "capability": "transactional-relational",
+        "detail": {},
+        "weak": false,
+        "from": ".env.example"
+      },
+      {
+        "kind": "migration",
+        "signal": "1 Django migration file(s)",
+        "conclusion": "transactional-relational (Django ORM migrations)",
+        "capability": "transactional-relational",
+        "from": "notes/migrations/0001_initial.py"
+      },
+      {
+        "kind": "dependency",
+        "signal": "requirements.txt lists \"django\"",
+        "conclusion": "web-compute (Django)",
+        "capability": "web-compute",
+        "detail": {
+          "framework": "django"
+        },
+        "from": "requirements.txt"
+      },
+      {
+        "kind": "dependency",
+        "signal": "requirements.txt lists \"gunicorn\"",
+        "conclusion": "web-compute (Gunicorn WSGI server)",
+        "capability": "web-compute",
+        "detail": {},
+        "weak": true,
+        "from": "requirements.txt"
+      },
+      {
+        "kind": "framework-file",
+        "signal": "manage.py present",
+        "conclusion": "web-compute (Django)",
+        "capability": "web-compute",
+        "detail": {
+          "framework": "django"
+        },
+        "from": "manage.py"
+      }
+    ],
+    "confirmations": [],
+    "meta": {
+      "generatedBy": "azx",
+      "generatedAt": "2024-01-01T00:00:00.000Z",
+      "stages": [
+        "read-repo",
+        "extract-intent"
+      ]
+    }
+  },
+  "plan": {
+    "region": "eastus2",
+    "resources": [
+      {
+        "id": "app-env",
+        "name": "cae-django-notes",
+        "type": "Microsoft.App/managedEnvironments",
+        "service": "Azure Container Apps Environment",
+        "region": "eastus2",
+        "estimatedMonthlyUsd": 0,
+        "notes": [
+          "Consumption plan — you pay only for running container replicas."
+        ]
+      },
+      {
+        "id": "web",
+        "name": "ca-django-notes",
+        "type": "Microsoft.App/containerApps",
+        "service": "Azure Container Apps",
+        "region": "eastus2",
+        "capability": "web-compute",
+        "dependsOn": [
+          "app-env",
+          "postgres"
+        ],
+        "estimatedMonthlyUsd": 40,
+        "notes": [
+          "Fallback options considered: Azure App Service (always-on web apps) or Azure Static Web Apps (static/JAMstack)."
+        ],
+        "properties": {
+          "ingress": {
+            "external": true,
+            "targetPort": 3000
+          },
+          "scale": {
+            "minReplicas": 1,
+            "maxReplicas": 10
+          }
+        }
+      },
+      {
+        "id": "postgres",
+        "name": "psql-django-notes",
+        "type": "Microsoft.DBforPostgreSQL/flexibleServers",
+        "service": "Azure Database for PostgreSQL Flexible Server",
+        "sku": "Standard_D2s_v3",
+        "region": "eastus2",
+        "capability": "transactional-relational",
+        "estimatedMonthlyUsd": 130,
+        "notes": [
+          "GeneralPurpose tier."
+        ],
+        "properties": {
+          "version": "16",
+          "storageGb": 32
+        }
+      },
+      {
+        "id": "postgres-db",
+        "name": "appdb",
+        "type": "Microsoft.DBforPostgreSQL/flexibleServers/databases",
+        "service": "PostgreSQL Database",
+        "region": "eastus2",
+        "capability": "transactional-relational",
+        "dependsOn": [
+          "postgres"
+        ],
+        "estimatedMonthlyUsd": 0
+      }
+    ],
+    "summary": [
+      "django-notes: resolved 4 Azure resource(s) across 3 capability slot(s) in eastus2 (dry-run).",
+      "  • Azure Container Apps Environment as \"cae-django-notes\"",
+      "  • Azure Container Apps as \"ca-django-notes\" ~$40/mo",
+      "  • Azure Database for PostgreSQL Flexible Server [Standard_D2s_v3] as \"psql-django-notes\" ~$130/mo",
+      "  • PostgreSQL Database as \"appdb\"",
+      "Estimated total: ~$170/mo USD."
+    ],
+    "confirmations": [
+      {
+        "id": "region",
+        "question": "Deploy to eastus2?",
+        "confidence": "medium",
+        "why": "No allowed-regions guardrail was found, so the MVP default region is used.",
+        "options": [
+          "eastus2",
+          "westeurope",
+          "swedencentral",
+          "westus3"
+        ],
+        "assumption": "eastus2"
+      }
+    ],
+    "guardrailNotes": [],
+    "warnings": [],
+    "budget": {
+      "estimatedMonthlyUsd": 170,
+      "currency": "USD",
+      "warnings": [],
+      "blocked": false
+    },
+    "meta": {
+      "generatedBy": "azx",
+      "generatedAt": "2024-01-01T00:00:00.000Z",
+      "dryRun": true
+    }
+  },
+  "bicep": "// ---------------------------------------------------------------------------\n// main.bicep — generated by azx (App Intent Service · POC #1, dry-run engine)\n// DRY-RUN PREVIEW ONLY — review before deploying. azx made no Azure calls.\n// Resolved region: eastus2\n// Estimated cost: ~$170/mo USD\n// ---------------------------------------------------------------------------\n\ntargetScope = 'resourceGroup'\n\n@description('Azure region for all resources.')\nparam location string = 'eastus2'\n\n// Consumption plan — you pay only for running container replicas.\nresource appEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {\n  name: 'cae-django-notes'\n  location: location\n  properties: {}\n}\n\n// Fallback options considered: Azure App Service (always-on web apps) or Azure Static Web Apps (static/JAMstack).\nresource web 'Microsoft.App/containerApps@2024-03-01' = {\n  name: 'ca-django-notes'\n  location: location\n  properties: {\n    managedEnvironmentId: appEnv.id\n    configuration: {\n      ingress: {\n        external: true\n        targetPort: 3000\n      }\n    }\n    template: {\n      scale: {\n        minReplicas: 1\n        maxReplicas: 10\n      }\n    }\n  }\n  dependsOn: [\n    appEnv\n    postgres\n  ]\n}\n\n// GeneralPurpose tier.\nresource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {\n  name: 'psql-django-notes'\n  location: location\n  sku: {\n    name: 'Standard_D2s_v3'\n    tier: 'GeneralPurpose'\n  }\n  properties: {\n      version: '16'\n      storage: {\n        storageSizeGB: 32\n      }\n      authConfig: {\n        passwordAuth: 'Enabled'\n      }\n  }\n}\n\nresource postgresDb 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-01' = {\n  name: 'psql-django-notes/appdb'\n  properties: {\n    charset: 'UTF8'\n    collation: 'en_US.utf8'\n  }\n  dependsOn: [\n    postgres\n  ]\n}\n\noutput webAppName string = web.name\noutput postgresServerName string = postgres.name\n"
+}

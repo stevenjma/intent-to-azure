@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/stevenjma/azx/app-intent.schema.json",
+  "title": "App Intent",
+  "description": "Open, capability-shaped contract for POST /v1/intent. Describes WHAT an app needs (provider-agnostic capabilities), not which cloud resources to create. Any tool may emit this document; azx resolves it to an Azure resource graph. Extendable: new capabilities and options slot in without breaking existing consumers.",
+  "type": "object",
+  "required": ["version", "app", "needs"],
+  "additionalProperties": true,
+  "properties": {
+    "version": {
+      "description": "Contract version.",
+      "const": "0.1"
+    },
+    "app": { "$ref": "#/$defs/appInfo" },
+    "needs": {
+      "description": "The capabilities the app needs. Order is not significant.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/need" }
+    },
+    "guardrails": { "$ref": "#/$defs/guardrails" },
+    "budget": { "$ref": "#/$defs/budgetContext" },
+    "signals": {
+      "description": "Evidence trail (added by the engine; not required in a hand-authored request).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/signal" }
+    },
+    "confirmations": {
+      "description": "Medium/low-confidence items to confirm before applying.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/confirmation" }
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "generatedBy": { "type": "string" },
+        "generatedAt": { "type": "string", "format": "date-time" },
+        "stages": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "confidence": {
+      "description": "Confidence tier. high = 2+ independent signals agree; medium = 1 signal (confirm card); low = weak/absent (ask once).",
+      "type": "string",
+      "enum": ["high", "medium", "low"]
+    },
+    "capabilityName": {
+      "description": "A capability name. The listed values are the MVP corpus; any string is accepted so third parties can introduce new capabilities.",
+      "type": "string",
+      "examples": [
+        "web-compute",
+        "transactional-relational",
+        "chat-model",
+        "embeddings",
+        "search-index",
+        "object-storage",
+        "background-jobs"
+      ]
+    },
+    "appInfo": {
+      "type": "object",
+      "required": ["name", "root"],
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string", "description": "Best-effort app name (manifest, else directory name)." },
+        "root": { "type": "string", "description": "Root that was scanned." },
+        "framework": { "type": "string", "description": "Primary framework, e.g. nextjs, fastapi, django." },
+        "language": { "type": "string", "description": "Primary language, e.g. typescript, python." },
+        "runtime": { "type": "string", "description": "Runtime hint, e.g. node, python." }
+      }
+    },
+    "need": {
+      "type": "object",
+      "required": ["capability", "confidence"],
+      "additionalProperties": true,
+      "properties": {
+        "capability": { "$ref": "#/$defs/capabilityName" },
+        "options": {
+          "description": "Capability-specific options. Open by design; see the profiles below for well-known keys.",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "branching": { "type": "boolean", "description": "transactional-relational: database branching requested." },
+            "consistency": { "type": "string", "enum": ["strong", "eventual"], "description": "transactional-relational: desired consistency." },
+            "pgvector": { "type": "boolean", "description": "transactional-relational: vector search served in-database via pgvector." },
+            "engine": { "type": "string", "description": "transactional-relational: detected engine (postgres in the MVP corpus)." },
+            "provider": { "type": "string", "description": "chat-model/embeddings: provider observed (openai, azure-openai, anthropic, ...)." },
+            "models": { "type": "array", "items": { "type": "string" }, "description": "chat-model/embeddings: model identifiers observed." },
+            "servedBy": { "type": "string", "description": "embeddings: where vectors live (e.g. pgvector) — pgvector keeps them out of AI Search." }
+          }
+        },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "rationale": { "type": "string", "description": "Plain-English justification." },
+        "evidence": { "type": "array", "items": { "type": "string" }, "description": "Human-readable summaries of the signals that produced this need." }
+      }
+    },
+    "signal": {
+      "type": "object",
+      "required": ["kind", "signal", "conclusion"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "description": "Independence bucket. Two signals of DIFFERENT kind pointing at the same capability are independent corroboration (→ high).",
+          "type": "string",
+          "enum": ["dependency", "import", "env", "migration", "config", "framework-file", "dockerfile", "ci", "manifest"]
+        },
+        "signal": { "type": "string", "description": "What was observed, e.g. 'package.json depends on \"next\"'." },
+        "conclusion": { "type": "string", "description": "What it implies, e.g. 'web-compute (Next.js app)'." },
+        "capability": { "$ref": "#/$defs/capabilityName" },
+        "detail": { "type": "object", "additionalProperties": true },
+        "weak": { "type": "boolean", "description": "Suggestive but insufficient alone (a lone weak signal yields low, not medium)." },
+        "from": { "type": "string", "description": "Repo-relative path the signal was read from." }
+      }
+    },
+    "confirmation": {
+      "type": "object",
+      "required": ["id", "question", "confidence", "why"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string", "description": "Stable id, e.g. 'region', 'capability:embeddings:store'." },
+        "capability": { "$ref": "#/$defs/capabilityName" },
+        "question": { "type": "string" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "why": { "type": "string" },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "assumption": { "type": "string", "description": "The engine's assumption if the developer does nothing." }
+      }
+    },
+    "guardrails": {
+      "description": "Policy that wins when repo and policy disagree.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "regions": { "type": "array", "items": { "type": "string" }, "description": "Allowed regions; the first is preferred." },
+        "approvedModels": { "type": "array", "items": { "type": "string" }, "description": "Allow-list of model ids; models outside it are rejected." },
+        "budget": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "monthlyCapUsd": { "type": "number" },
+            "onExceed": { "type": "string", "enum": ["warn", "block"] }
+          }
+        },
+        "skuTier": { "type": "string", "enum": ["economy", "standard"] },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "budgetContext": {
+      "description": "Budget context, normally from the subscription; mocked from .azx/subscription.json in this POC.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "subscriptionId": { "type": "string" },
+        "offerId": { "type": "string", "description": "Azure Offer ID, e.g. MS-AZR-0036P (sponsorship)." },
+        "spendingLimit": { "type": "string", "enum": ["on", "off", "unknown"] },
+        "classification": { "type": "string", "enum": ["sponsorship", "free-trial", "pay-as-you-go", "enterprise", "unknown"] },
+        "currency": { "type": "string" }
+      }
+    }
+  }
+}
