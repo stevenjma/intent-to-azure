@@ -3,7 +3,7 @@
     "version": "0.1",
     "app": {
       "name": "vector-search-api",
-      "root": "examples/vector-search-api",
+      "root": "vector-search-api",
       "runtime": "python",
       "language": "python",
       "framework": "fastapi"

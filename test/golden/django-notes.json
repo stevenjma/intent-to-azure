@@ -3,7 +3,7 @@
     "version": "0.1",
     "app": {
       "name": "django-notes",
-      "root": "examples/django-notes",
+      "root": "django-notes",
       "runtime": "python",
       "language": "python",
       "framework": "django"

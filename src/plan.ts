@@ -79,9 +79,21 @@ export function plan(intent: AppIntent, opts: PlanOptions = {}): AzurePlan {
 // Region & SKU resolution (guardrails win)
 // ---------------------------------------------------------------------------
 
+/**
+ * Azure regions are lowercase alphanumerics (e.g. eastus, westeurope). Strip
+ * everything else so a stray quote/whitespace/newline in a resolved region can
+ * never corrupt the generated Bicep preview.
+ */
+export function slugifyRegion(region: string): string {
+  return region.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
 function resolveRegion(guardrails?: Guardrails): { region: string; pinnedByGuardrail: boolean } {
   const first = guardrails?.regions?.[0];
-  if (first) return { region: first, pinnedByGuardrail: true };
+  if (first) {
+    const slug = slugifyRegion(first);
+    if (slug) return { region: slug, pinnedByGuardrail: true };
+  }
   return { region: DEFAULT_REGION, pinnedByGuardrail: false };
 }
 

@@ -10,9 +10,9 @@
  *   2. validate the emitted App Intent against `app-intent.schema.json`
  *      (JSON Schema draft 2020-12), plus a few capability invariants.
  *
- * The engine touches no network, so these run fully offline. The only
- * machine-specific value in the output is `intent.app.root` (an absolute
- * path); we normalize it to `examples/<fixture>` so goldens are portable.
+ * The engine touches no network, so these run fully offline. The engine now
+ * serializes `intent.app.root` as a portable directory basename (e.g.
+ * `contoso-marketing`), so goldens contain no machine-specific absolute path.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -47,12 +47,10 @@ function schemaPath(): string {
   return fileURLToPath(new URL("../../app-intent.schema.json", import.meta.url));
 }
 
-/** Run the full pipeline with a pinned clock and a portable app.root. */
+/** Run the full pipeline with a pinned clock. The engine emits a portable
+ *  `app.root` (directory basename), so no path normalization is needed here. */
 function build(name: Fixture): Snapshot {
-  const res = resolveRepo(repoRoot(name), { now: () => FIXED });
-  // Normalize the one absolute path so goldens are machine-independent.
-  res.intent.app.root = `examples/${name}`;
-  return res;
+  return resolveRepo(repoRoot(name), { now: () => FIXED });
 }
 
 /** JSON round-trip so comparisons ignore `undefined`/key-order like the file. */

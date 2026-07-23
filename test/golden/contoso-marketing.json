@@ -3,7 +3,7 @@
     "version": "0.1",
     "app": {
       "name": "contoso-marketing",
-      "root": "examples/contoso-marketing",
+      "root": "contoso-marketing",
       "runtime": "node",
       "framework": "nextjs",
       "language": "typescript"

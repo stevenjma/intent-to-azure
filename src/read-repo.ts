@@ -7,7 +7,7 @@
  * list of {@link Signal}s tagged with an independence `kind`.
  */
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, lstatSync } from "node:fs";
 import { basename, join, relative, sep } from "node:path";
 import type { AppInfo, Signal, SignalKind } from "./types.js";
 
@@ -99,10 +99,13 @@ function walk(root: string, dir: string, acc: string[]): void {
     const abs = join(dir, name);
     let st;
     try {
-      st = statSync(abs);
+      // lstatSync (not statSync) so we can detect symlinks without following them.
+      st = lstatSync(abs);
     } catch {
       continue;
     }
+    // Do not follow symlinks: a symlinked dir/file could point outside the repo.
+    if (st.isSymbolicLink()) continue;
     if (st.isDirectory()) {
       if (IGNORE_DIRS.has(name)) continue;
       walk(root, abs, acc);
@@ -128,7 +131,10 @@ export function readRepo(root: string): RepoScan {
   const signals: Signal[] = [];
   const push = (s: Signal) => signals.push(s);
 
-  const app: AppInfo = { name: basename(root) || "app", root };
+  // Serialize a portable, machine-independent root (directory basename only) so
+  // committed output/goldens never bake in an absolute path (e.g. C:\Users\...).
+  // Filesystem access uses the local `root` var (and RepoIndex.root), not app.root.
+  const app: AppInfo = { name: basename(root) || "app", root: basename(root) || "app" };
 
   detectNode(idx, app, push);
   detectPython(idx, app, push);
