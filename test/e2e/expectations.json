@@ -9,8 +9,7 @@
         { "id": "web", "type": "Microsoft.App/containerApps" }
       ],
       "compile": "pass",
-      "whatif": "fail",
-      "whatifKnownIssue": "bug2: containerApps emits empty containers[] -> ContainerAppCreateMustContainContainer"
+      "whatif": "pass"
     },
     "next-prisma-postgres": {
       "needs": ["web-compute", "transactional-relational"],
@@ -21,8 +20,7 @@
         { "id": "postgres-db", "type": "Microsoft.DBforPostgreSQL/flexibleServers/databases" }
       ],
       "compile": "pass",
-      "whatif": "fail",
-      "whatifKnownIssue": "bug2: containerApps emits empty containers[] -> ContainerAppCreateMustContainContainer"
+      "whatif": "pass"
     },
     "next-openai": {
       "needs": ["web-compute", "chat-model"],
@@ -32,10 +30,9 @@
         { "id": "openai", "type": "Microsoft.CognitiveServices/accounts" },
         { "id": "openai-deploy-gpt-4o", "type": "Microsoft.CognitiveServices/accounts/deployments" }
       ],
-      "compile": "fail",
-      "compileKnownIssue": "bug1: CognitiveServices/accounts emits `customSubDomainName: name` (bare identifier) -> BCP057. Every chat-model app fails to compile until src/bicep.ts is fixed.",
-      "whatif": "skip",
-      "whatifKnownIssue": "template does not compile (bug1), so what-if never runs"
+      "compile": "pass",
+      "whatif": "fail",
+      "whatifKnownIssue": "environment/product signal, not a codegen bug: azx faithfully emits the requested model (gpt-4o, newest grounded version 2024-11-20), but every gpt-4o/gpt-4.1/gpt-4o-mini version is retired/deprecating in this target catalog's clock, so CognitiveServices preflight rejects the deployment. An offline tool cannot track live model lifecycle; the honest options are live catalog lookup, a maintained version map, or omit-and-document. Compile + subdomain + explicit-version fixes are all correct; this gate stays FAIL until the catalog carries a GA gpt-4o (or azx gains live lookup)."
     },
     "next-blob-storage": {
       "needs": ["web-compute", "object-storage"],
@@ -46,8 +43,7 @@
         { "id": "blob", "type": "Microsoft.Storage/storageAccounts/blobServices/containers" }
       ],
       "compile": "pass",
-      "whatif": "fail",
-      "whatifKnownIssue": "bug2: containerApps emits empty containers[] -> ContainerAppCreateMustContainContainer"
+      "whatif": "pass"
     }
   }
 }

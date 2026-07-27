@@ -142,7 +142,9 @@ for (const app of apps) {
       console.log(`  what-if: SKIP (could not create RG — check permissions on the subscription)`);
       console.log(`           ${created.combined.split("\n")[0]}`);
     } else {
-      const wi = run(`az deployment group what-if -g ${rg} --template-file "${bicepPath}" --no-pretty-print`);
+      const needsPgPw = readFileSync(bicepPath, "utf8").includes("param postgresAdminPassword");
+      const pgParams = needsPgPw ? ` --parameters postgresAdminPassword=Dummy_Whatif_Pw_9271!` : "";
+      const wi = run(`az deployment group what-if -g ${rg} --template-file "${bicepPath}"${pgParams} --no-pretty-print`);
       whatif = wi.status === 0 ? "pass" : "fail";
       writeFileSync(join(workDir, `whatif-${app}.txt`), wi.combined);
       const sig = spec.apps[app].whatifKnownIssue?.match(/([A-Z][A-Za-z]+MustContain[A-Za-z]+)/)?.[1];
