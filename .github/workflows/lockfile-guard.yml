@@ -1,0 +1,21 @@
+name: lockfile-guard
+
+# Fails CI if any tracked package-lock.json or .npmrc references an internal
+# Azure DevOps npm feed or contains committed auth material. Prevents the
+# internal-feed leak fixed in PR #3 from silently returning.
+
+on:
+  pull_request:
+  push:
+    branches: [main, poc-1-dry-run-engine]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan lockfiles and .npmrc for internal feeds / auth tokens
+        run: bash scripts/verify-lockfile.sh
