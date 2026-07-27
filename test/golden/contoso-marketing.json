@@ -1,0 +1,433 @@
+{
+  "intent": {
+    "version": "0.1",
+    "app": {
+      "name": "contoso-marketing",
+      "root": "contoso-marketing",
+      "runtime": "node",
+      "framework": "nextjs",
+      "language": "typescript"
+    },
+    "needs": [
+      {
+        "capability": "web-compute",
+        "confidence": "high",
+        "rationale": "web-compute (Azure deploy target in CI): 4 independent signals (ci, dependency, framework-file, manifest) point at web-compute; corroborated across signal kinds, so it is applied without asking.",
+        "evidence": [
+          ".github/workflows/deploy.yml deploys to Azure",
+          "1 GitHub Actions workflow(s)",
+          "lockfile package-lock.json",
+          "next.config.mjs present",
+          "package.json depends on \"next\"",
+          "package.json depends on \"react\""
+        ]
+      },
+      {
+        "capability": "transactional-relational",
+        "confidence": "high",
+        "rationale": "transactional-relational (Prisma ORM): 3 independent signals (dependency, env, migration) point at transactional-relational; corroborated across signal kinds, so it is applied without asking.",
+        "evidence": [
+          ".env.example sets DATABASE_URL",
+          "1 Prisma migration file(s)",
+          "package.json depends on \"@prisma/client\"",
+          "package.json depends on \"prisma\""
+        ]
+      },
+      {
+        "capability": "chat-model",
+        "options": {
+          "provider": "openai",
+          "models": [
+            "gpt-4o"
+          ]
+        },
+        "confidence": "high",
+        "rationale": "chat-model (OpenAI SDK): 3 independent signals (dependency, env, import) point at chat-model; corroborated across signal kinds, so it is applied without asking.",
+        "evidence": [
+          ".env.example sets OPENAI_API_KEY",
+          "app/api/chat/route.ts imports/uses openai",
+          "package.json depends on \"openai\""
+        ]
+      },
+      {
+        "capability": "object-storage",
+        "options": {
+          "provider": "azure-blob"
+        },
+        "confidence": "high",
+        "rationale": "object-storage (Azure Blob SDK): 3 independent signals (dependency, env, import) point at object-storage; corroborated across signal kinds, so it is applied without asking.",
+        "evidence": [
+          ".env.example sets AZURE_STORAGE_CONNECTION_STRING",
+          "lib/blob.ts imports/uses azure-blob",
+          "package.json depends on \"@azure/storage-blob\""
+        ]
+      }
+    ],
+    "guardrails": {
+      "regions": [
+        "swedencentral",
+        "westeurope"
+      ],
+      "approvedModels": [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "text-embedding-3-large"
+      ],
+      "budget": {
+        "monthlyCapUsd": 200,
+        "onExceed": "warn"
+      },
+      "skuTier": "economy",
+      "notes": [
+        "EU data residency: deploy only to European regions.",
+        "Startup sponsorship — keep SKUs economical and watch burn."
+      ]
+    },
+    "budget": {
+      "subscriptionId": "00000000-0000-0000-0000-000000000000",
+      "offerId": "MS-AZR-0036P",
+      "spendingLimit": "on",
+      "classification": "sponsorship",
+      "currency": "USD"
+    },
+    "signals": [
+      {
+        "kind": "dependency",
+        "signal": "package.json depends on \"openai\"",
+        "conclusion": "chat-model (OpenAI SDK)",
+        "capability": "chat-model",
+        "detail": {
+          "provider": "openai"
+        },
+        "from": "package.json"
+      },
+      {
+        "kind": "env",
+        "signal": ".env.example sets OPENAI_API_KEY",
+        "conclusion": "chat-model (OpenAI env)",
+        "capability": "chat-model",
+        "detail": {
+          "provider": "openai"
+        },
+        "weak": false,
+        "from": ".env.example"
+      },
+      {
+        "kind": "import",
+        "signal": "app/api/chat/route.ts imports/uses openai",
+        "conclusion": "chat-model (OpenAI usage)",
+        "capability": "chat-model",
+        "detail": {
+          "provider": "openai",
+          "models": [
+            "gpt-4o"
+          ]
+        },
+        "from": "app/api/chat/route.ts"
+      },
+      {
+        "kind": "dependency",
+        "signal": "package.json depends on \"@azure/storage-blob\"",
+        "conclusion": "object-storage (Azure Blob SDK)",
+        "capability": "object-storage",
+        "detail": {
+          "provider": "azure-blob"
+        },
+        "from": "package.json"
+      },
+      {
+        "kind": "env",
+        "signal": ".env.example sets AZURE_STORAGE_CONNECTION_STRING",
+        "conclusion": "object-storage (Azure Storage env)",
+        "capability": "object-storage",
+        "detail": {
+          "provider": "azure-blob"
+        },
+        "weak": false,
+        "from": ".env.example"
+      },
+      {
+        "kind": "import",
+        "signal": "lib/blob.ts imports/uses azure-blob",
+        "conclusion": "object-storage (Azure Blob usage)",
+        "capability": "object-storage",
+        "detail": {
+          "provider": "azure-blob"
+        },
+        "from": "lib/blob.ts"
+      },
+      {
+        "kind": "dependency",
+        "signal": "package.json depends on \"@prisma/client\"",
+        "conclusion": "transactional-relational (Prisma ORM)",
+        "capability": "transactional-relational",
+        "detail": {},
+        "from": "package.json"
+      },
+      {
+        "kind": "dependency",
+        "signal": "package.json depends on \"prisma\"",
+        "conclusion": "transactional-relational (Prisma ORM)",
+        "capability": "transactional-relational",
+        "detail": {},
+        "from": "package.json"
+      },
+      {
+        "kind": "env",
+        "signal": ".env.example sets DATABASE_URL",
+        "conclusion": "transactional-relational (DATABASE_URL)",
+        "capability": "transactional-relational",
+        "detail": {},
+        "weak": false,
+        "from": ".env.example"
+      },
+      {
+        "kind": "migration",
+        "signal": "1 Prisma migration file(s)",
+        "conclusion": "transactional-relational (Prisma schema/migrations)",
+        "capability": "transactional-relational",
+        "from": "prisma/migrations/20240115000000_init/migration.sql"
+      },
+      {
+        "kind": "ci",
+        "signal": ".github/workflows/deploy.yml deploys to Azure",
+        "conclusion": "web-compute (Azure deploy target in CI)",
+        "capability": "web-compute",
+        "detail": {
+          "ci": "github-actions",
+          "azure": true
+        },
+        "from": ".github/workflows/deploy.yml"
+      },
+      {
+        "kind": "ci",
+        "signal": "1 GitHub Actions workflow(s)",
+        "conclusion": "CI/CD via GitHub Actions (deploy convention)",
+        "capability": "web-compute",
+        "detail": {
+          "ci": "github-actions"
+        },
+        "weak": true,
+        "from": ".github/workflows/deploy.yml"
+      },
+      {
+        "kind": "dependency",
+        "signal": "package.json depends on \"next\"",
+        "conclusion": "web-compute (Next.js)",
+        "capability": "web-compute",
+        "detail": {
+          "framework": "nextjs"
+        },
+        "from": "package.json"
+      },
+      {
+        "kind": "dependency",
+        "signal": "package.json depends on \"react\"",
+        "conclusion": "web-compute (React SPA)",
+        "capability": "web-compute",
+        "detail": {
+          "framework": "react"
+        },
+        "weak": true,
+        "from": "package.json"
+      },
+      {
+        "kind": "framework-file",
+        "signal": "next.config.mjs present",
+        "conclusion": "web-compute (Next.js)",
+        "capability": "web-compute",
+        "detail": {
+          "framework": "nextjs"
+        },
+        "from": "next.config.mjs"
+      },
+      {
+        "kind": "manifest",
+        "signal": "lockfile package-lock.json",
+        "conclusion": "Node runtime (deployable web-compute)",
+        "capability": "web-compute",
+        "from": "package-lock.json",
+        "weak": true
+      }
+    ],
+    "confirmations": [],
+    "meta": {
+      "generatedBy": "azx",
+      "generatedAt": "2024-01-01T00:00:00.000Z",
+      "stages": [
+        "read-repo",
+        "extract-intent"
+      ]
+    }
+  },
+  "plan": {
+    "region": "swedencentral",
+    "resources": [
+      {
+        "id": "app-env",
+        "name": "cae-contoso-marketing",
+        "type": "Microsoft.App/managedEnvironments",
+        "service": "Azure Container Apps Environment",
+        "region": "swedencentral",
+        "estimatedMonthlyUsd": 0,
+        "notes": [
+          "Consumption plan — you pay only for running container replicas."
+        ]
+      },
+      {
+        "id": "web",
+        "name": "ca-contoso-marketing",
+        "type": "Microsoft.App/containerApps",
+        "service": "Azure Container Apps",
+        "region": "swedencentral",
+        "capability": "web-compute",
+        "dependsOn": [
+          "app-env",
+          "openai",
+          "postgres",
+          "storage"
+        ],
+        "estimatedMonthlyUsd": 15,
+        "notes": [
+          "Fallback options considered: Azure App Service (always-on web apps) or Azure Static Web Apps (static/JAMstack)."
+        ],
+        "properties": {
+          "ingress": {
+            "external": true,
+            "targetPort": 3000
+          },
+          "scale": {
+            "minReplicas": 0,
+            "maxReplicas": 3
+          }
+        }
+      },
+      {
+        "id": "postgres",
+        "name": "psql-contoso-marketing",
+        "type": "Microsoft.DBforPostgreSQL/flexibleServers",
+        "service": "Azure Database for PostgreSQL Flexible Server",
+        "sku": "Standard_B1ms",
+        "region": "swedencentral",
+        "capability": "transactional-relational",
+        "estimatedMonthlyUsd": 15,
+        "notes": [
+          "Burstable tier."
+        ],
+        "properties": {
+          "version": "16",
+          "storageGb": 32
+        }
+      },
+      {
+        "id": "postgres-db",
+        "name": "appdb",
+        "type": "Microsoft.DBforPostgreSQL/flexibleServers/databases",
+        "service": "PostgreSQL Database",
+        "region": "swedencentral",
+        "capability": "transactional-relational",
+        "dependsOn": [
+          "postgres"
+        ],
+        "estimatedMonthlyUsd": 0
+      },
+      {
+        "id": "openai",
+        "name": "oai-contoso-marketing",
+        "type": "Microsoft.CognitiveServices/accounts",
+        "service": "Azure OpenAI",
+        "sku": "S0",
+        "region": "swedencentral",
+        "capability": "chat-model",
+        "estimatedMonthlyUsd": 0,
+        "notes": [
+          "Token usage is billed per-1K tokens; the fixed cost is $0. Confirm model availability in the chosen region."
+        ],
+        "properties": {
+          "kind": "OpenAI"
+        }
+      },
+      {
+        "id": "openai-deploy-gpt-4o",
+        "name": "gpt-4o",
+        "type": "Microsoft.CognitiveServices/accounts/deployments",
+        "service": "Azure OpenAI Deployment",
+        "region": "swedencentral",
+        "capability": "chat-model",
+        "dependsOn": [
+          "openai"
+        ],
+        "estimatedMonthlyUsd": 0,
+        "properties": {
+          "model": "gpt-4o",
+          "capacityK": 10
+        }
+      },
+      {
+        "id": "storage",
+        "name": "stcontosomarketing",
+        "type": "Microsoft.Storage/storageAccounts",
+        "service": "Azure Blob Storage",
+        "sku": "Standard_LRS",
+        "region": "swedencentral",
+        "capability": "object-storage",
+        "estimatedMonthlyUsd": 5,
+        "properties": {
+          "kind": "StorageV2",
+          "accessTier": "Hot"
+        }
+      },
+      {
+        "id": "blob",
+        "name": "assets",
+        "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+        "service": "Blob Container",
+        "region": "swedencentral",
+        "capability": "object-storage",
+        "dependsOn": [
+          "storage"
+        ],
+        "estimatedMonthlyUsd": 0
+      }
+    ],
+    "summary": [
+      "contoso-marketing: resolved 8 Azure resource(s) across 7 capability slot(s) in swedencentral (dry-run).",
+      "  • Azure Container Apps Environment as \"cae-contoso-marketing\"",
+      "  • Azure Container Apps as \"ca-contoso-marketing\" ~$15/mo",
+      "  • Azure Database for PostgreSQL Flexible Server [Standard_B1ms] as \"psql-contoso-marketing\" ~$15/mo",
+      "  • PostgreSQL Database as \"appdb\"",
+      "  • Azure OpenAI [S0] as \"oai-contoso-marketing\"",
+      "  • Azure OpenAI Deployment as \"gpt-4o\"",
+      "  • Azure Blob Storage [Standard_LRS] as \"stcontosomarketing\" ~$5/mo",
+      "  • Blob Container as \"assets\"",
+      "Estimated total: ~$35/mo USD (cap $200/mo).",
+      "Sponsorship subscription detected — defaulting to economy SKUs and warning on burn."
+    ],
+    "confirmations": [],
+    "guardrailNotes": [
+      "Region pinned to swedencentral by guardrails (allowed: swedencentral, westeurope).",
+      "Model allow-list enforced: gpt-4o, gpt-4o-mini, text-embedding-3-large.",
+      "SKU tier forced to 'economy' by guardrails.",
+      "Monthly spend cap: $200 (onExceed: warn).",
+      "EU data residency: deploy only to European regions.",
+      "Startup sponsorship — keep SKUs economical and watch burn."
+    ],
+    "warnings": [],
+    "budget": {
+      "estimatedMonthlyUsd": 35,
+      "currency": "USD",
+      "monthlyCapUsd": 200,
+      "classification": "sponsorship",
+      "warnings": [
+        "sponsorship subscription: using economy SKUs; monitor burn against your credit."
+      ],
+      "blocked": false
+    },
+    "meta": {
+      "generatedBy": "azx",
+      "generatedAt": "2024-01-01T00:00:00.000Z",
+      "dryRun": true
+    }
+  },
+  "bicep": "// ---------------------------------------------------------------------------\n// main.bicep — generated by azx (App Intent Service · POC #1, dry-run engine)\n// DRY-RUN PREVIEW ONLY — review before deploying. azx made no Azure calls.\n// Resolved region: swedencentral\n// Estimated cost: ~$35/mo USD\n// ---------------------------------------------------------------------------\n\ntargetScope = 'resourceGroup'\n\n@description('Azure region for all resources.')\nparam location string = 'swedencentral'\n\n// Consumption plan — you pay only for running container replicas.\nresource appEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {\n  name: 'cae-contoso-marketing'\n  location: location\n  properties: {}\n}\n\n// Fallback options considered: Azure App Service (always-on web apps) or Azure Static Web Apps (static/JAMstack).\nresource web 'Microsoft.App/containerApps@2024-03-01' = {\n  name: 'ca-contoso-marketing'\n  location: location\n  properties: {\n    managedEnvironmentId: appEnv.id\n    configuration: {\n      ingress: {\n        external: true\n        targetPort: 3000\n      }\n    }\n    template: {\n      scale: {\n        minReplicas: 0\n        maxReplicas: 3\n      }\n    }\n  }\n  dependsOn: [\n    appEnv\n    openai\n    postgres\n    storage\n  ]\n}\n\n// Burstable tier.\nresource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {\n  name: 'psql-contoso-marketing'\n  location: location\n  sku: {\n    name: 'Standard_B1ms'\n    tier: 'Burstable'\n  }\n  properties: {\n      version: '16'\n      storage: {\n        storageSizeGB: 32\n      }\n      authConfig: {\n        passwordAuth: 'Enabled'\n      }\n  }\n}\n\nresource postgresDb 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-01' = {\n  name: 'psql-contoso-marketing/appdb'\n  properties: {\n    charset: 'UTF8'\n    collation: 'en_US.utf8'\n  }\n  dependsOn: [\n    postgres\n  ]\n}\n\n// Token usage is billed per-1K tokens; the fixed cost is $0. Confirm model availability in the chosen region.\nresource openai 'Microsoft.CognitiveServices/accounts@2024-10-01' = {\n  name: 'oai-contoso-marketing'\n  location: location\n  kind: 'OpenAI'\n  sku: {\n    name: 'S0'\n  }\n  properties: {\n    publicNetworkAccess: 'Enabled'\n    customSubDomainName: name\n  }\n}\n\nresource openaiDeployGpt4o 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {\n  name: 'oai-contoso-marketing/gpt-4o'\n  sku: {\n    name: 'Standard'\n    capacity: 10\n  }\n  properties: {\n    model: {\n      format: 'OpenAI'\n      name: 'gpt-4o'\n    }\n  }\n  dependsOn: [\n    openai\n  ]\n}\n\nresource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {\n  name: 'stcontosomarketing'\n  location: location\n  kind: 'StorageV2'\n  sku: {\n    name: 'Standard_LRS'\n  }\n  properties: {\n    accessTier: 'Hot'\n    supportsHttpsTrafficOnly: true\n    minimumTlsVersion: 'TLS1_2'\n    allowBlobPublicAccess: false\n  }\n}\n\nresource blob 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {\n  name: 'stcontosomarketing/default/assets'\n  properties: {\n    publicAccess: 'None'\n  }\n  dependsOn: [\n    storage\n  ]\n}\n\noutput webAppName string = web.name\noutput postgresServerName string = postgres.name\noutput storageAccountName string = storage.name\n"
+}
