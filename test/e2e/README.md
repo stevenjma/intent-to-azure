@@ -5,9 +5,10 @@ Service). It commits real, editable Next.js app trees, throws each one at azx, a
 proves every stage with a **distinct gate** — so you can edit a fixture, re-run, and
 form opinions about what azx actually produces.
 
-It runs locally (plan + compile) and in CI (`.github/workflows/e2e.yml`, adds the
-optional what-if gate). It is intentionally **green today** even though azx has two
-known codegen bugs — those are encoded as *expected* outcomes (see below).
+It runs locally — offline gates by default, plus an **optional local what-if** that
+reuses your `az login` (see below) — and in CI (`.github/workflows/e2e.yml`, which
+runs the what-if gate via OIDC). It is intentionally **green today** even though azx
+has two known codegen bugs — those are encoded as *expected* outcomes (see below).
 
 ---
 
@@ -68,29 +69,60 @@ Fixing either bug means changing `src/bicep.ts` and regenerating goldens
 
 ## Run it locally
 
-Build azx, then per fixture run plan → bicep → compile → assert:
+Build azx, then drive the whole pipeline with the cross-platform runner
+`test/e2e/local.mjs`. It does plan → bicep → compile → (optional what-if) → assert
+for one fixture or all of them, and prints a per-gate table plus a summary.
 
 ```bash
 npm install --registry=https://registry.npmjs.org/
 npm run build
 
-APP=next-minimal
-node dist/src/cli.js plan  "test/e2e/apps/$APP" --json > "plan-$APP.json"
-node dist/src/cli.js bicep "test/e2e/apps/$APP" --out "main-$APP.bicep"
-
-# compile gate (no creds)
-if az bicep build --file "main-$APP.bicep" --stdout >/dev/null 2> err.txt; \
-  then COMPILE=pass; else COMPILE=fail; fi
-
-node test/e2e/assert.mjs --app "$APP" --plan "plan-$APP.json" --compile "$COMPILE"
+# offline gates (analyzed + plan-match + compile) — no Azure needed
+node test/e2e/local.mjs                       # all four fixtures
+node test/e2e/local.mjs --app next-minimal    # just one
 ```
 
-`assert.mjs` prints a per-gate table and exits non-zero only on a hard fail. Omit
-`--whatif` (defaults to `skip`) when you have no Azure creds.
+The runner exits non-zero only on a **hard fail** (plan-match drift, or a gate
+flipping the *good* way). Known bugs reconcile to `KNOWN` and stay green.
 
-To **tinker**: edit a fixture (add a dep, a route, an env var), re-run the three
-commands, and watch which gate moves. If you change what azx *should* produce, update
+### Run the what-if gate locally (reuses your `az login`)
+
+You don't need OIDC or an app registration to exercise what-if locally — just be
+logged in (`az login`) with a subscription you can create resource groups in. Add
+`--whatif`:
+
+```bash
+node test/e2e/local.mjs --app next-minimal --whatif      # one app
+node test/e2e/local.mjs --whatif                         # all apps
+```
+
+For each app that compiles, the runner:
+1. creates an **ephemeral** resource group (`azx-e2e-local-<app>-<ts>`, tagged
+   `azx-e2e=1 ttl=2h`, region from `expectations.json`),
+2. runs `az deployment group what-if` — a **preflight only**, it deploys nothing,
+3. deletes the RG afterward (pass `--keep` to leave it for inspection).
+
+Flags: `--sub <id>` (default = current `az` context), `--region <r>` (default from
+`expectations.json`), `--keep`. If you pass `--whatif` without being logged in, the
+runner stops with a clear message rather than silently skipping.
+
+With what-if on, `next-minimal` reports **what-if = KNOWN (bug2)** — Azure's
+validator rejects the empty container app with the real errors:
+
+```
+ContainerAppCreateMustContainContainer - Must specify atleast one container ...
+ContainerAppInvalidResourceTotal       - requested CPU and memory (CPU: 0, memory: 0) is invalid ...
+```
+
+That is bug2 observed live, not merely asserted. `next-openai` auto-**skips**
+what-if because it never compiles (bug1).
+
+To **tinker**: edit a fixture (add a dep, a route, an env var), re-run the runner,
+and watch which gate moves. If you change what azx *should* produce, update
 `expectations.json` to match.
+
+> Scratch artifacts (plan/bicep/what-if output) land in `test/e2e/.local/`, which is
+> gitignored.
 
 ---
 

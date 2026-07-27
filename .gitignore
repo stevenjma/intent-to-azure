@@ -20,3 +20,6 @@ npm-debug.log*
 
 # Test coverage
 coverage/
+
+# Local E2E runner scratch (bicep/plan/what-if artifacts from test/e2e/local.mjs)
+test/e2e/.local/
