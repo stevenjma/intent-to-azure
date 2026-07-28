@@ -41,6 +41,8 @@ export type { MapContext } from "./azure-map.js";
 
 export { generateBicep } from "./bicep.js";
 
+export { diffPlans } from "./diff.js";
+
 export { DryRunDeployer, dryRun } from "./run.js";
 export type { Deployer, RunOptions, RunResult } from "./run.js";
 
