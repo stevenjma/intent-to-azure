@@ -41,7 +41,7 @@
   },
   "$defs": {
     "confidence": {
-      "description": "Confidence tier. high = 2+ independent signals agree; medium = 1 signal (confirm card); low = weak/absent (ask once).",
+      "description": "Confidence tier. high = 2+ independent signals of different kinds agree AND at least one is non-weak; medium = a single non-weak signal, or 2+ weak signals of different kinds (confirm card); low = a lone weak signal / absence (ask once).",
       "type": "string",
       "enum": ["high", "medium", "low"]
     },

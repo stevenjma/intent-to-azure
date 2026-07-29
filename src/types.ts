@@ -14,7 +14,11 @@
 // Capability vocabulary
 // ---------------------------------------------------------------------------
 
-/** Known capability names. New capabilities slot in without breaking existing ones. */
+/**
+ * Known capability names (the MVP corpus). Adding one never breaks existing
+ * consumers, but wiring it into the resolver is a deliberate multi-file change
+ * (see SPEC.md §10 "How to add a capability").
+ */
 export type KnownCapability =
   | "web-compute"
   | "transactional-relational"

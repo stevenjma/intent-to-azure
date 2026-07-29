@@ -26,6 +26,7 @@ import type {
   AzurePlan,
   AzureResource,
   BudgetContext,
+  CapabilityName,
   ClockOptions,
   Confirmation,
   Guardrails,
@@ -144,7 +145,8 @@ function buildResources(needs: Need[], ctx: MapContext, guardrails?: Guardrails)
         resources.push(...buildBackgroundJobs(need, ctx));
         break;
       default:
-        // Unknown capability — never guessed; surfaced as a confirm elsewhere.
+        // Unknown capability — never guessed. buildPlanConfirmations surfaces it
+        // as an "unresolved capability" confirm card (see RESOLVABLE_CAPABILITIES).
         break;
     }
   }
@@ -291,6 +293,26 @@ function rollUpBudget(
 // Confirmations & warnings
 // ---------------------------------------------------------------------------
 
+/**
+ * Capabilities {@link buildResources} knows how to resolve into Azure resources
+ * (mirrors the switch cases). Any `needs[]` capability outside this set falls
+ * through the resolver's `default:` no-op and must be surfaced as a confirm card
+ * rather than silently dropped — the spec's open-capability contract
+ * (SPEC.md §4: "planners that don't understand one should surface it as a
+ * confirm card rather than fail"). azx's own read-repo path only ever emits
+ * these known capabilities, but a hand-authored / third-party intent (or the
+ * future MCP `plan` tool) can carry anything.
+ */
+const RESOLVABLE_CAPABILITIES: ReadonlySet<CapabilityName> = new Set<CapabilityName>([
+  "web-compute",
+  "transactional-relational",
+  "chat-model",
+  "embeddings",
+  "search-index",
+  "object-storage",
+  "background-jobs",
+]);
+
 function buildPlanConfirmations(
   intent: AppIntent,
   needs: Need[],
@@ -309,6 +331,28 @@ function buildPlanConfirmations(
       why: "No allowed-regions guardrail was found, so the MVP default region is used.",
       options: [region, "westeurope", "swedencentral", "westus3"],
       assumption: region,
+    });
+  }
+
+  // Unknown/unresolvable capability → the resolver produced no resource for it.
+  // Surface it as a confirm card (never a silent drop) so external emitters and
+  // the future MCP `plan` tool get an honest signal.
+  for (const need of needs) {
+    if (RESOLVABLE_CAPABILITIES.has(need.capability)) continue;
+    const id = `capability:${need.capability}:unresolved`;
+    if (byId.has(id)) continue;
+    byId.set(id, {
+      id,
+      capability: need.capability,
+      question:
+        `azx has no resolver for capability '${need.capability}' yet — confirm how it should ` +
+        `be provisioned (or provide an escape-hatch declarative file).`,
+      confidence: "low",
+      why:
+        `The App Intent requested '${need.capability}', which is outside the MVP corpus, ` +
+        `so no Azure resource was resolved for it.`,
+      options: ["Provide an escape-hatch declarative file", "Skip this capability"],
+      assumption: "Skip this capability",
     });
   }
 

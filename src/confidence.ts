@@ -2,8 +2,8 @@
  * The confidence model.
  *
  *   high   = 2+ independent signals agree (distinct signal kinds, at least one strong)
- *   medium = a single signal          → surface a confirm card
- *   low    = only a weak hint          → ask once
+ *   medium = a single strong signal, or 2+ weak signals of distinct kinds → confirm card
+ *   low    = only a lone weak hint     → ask once
  *
  * "Independent" means the signals come from different {@link SignalKind}s — e.g.
  * a dependency AND a migration AND an env var all pointing at the same capability
