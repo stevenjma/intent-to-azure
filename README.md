@@ -44,6 +44,56 @@ the **App Intent JSON**, the resolved **Azure plan** (plain-English + Bicep), an
 
 ---
 
+## Run it on your own repo
+
+The bundled `examples/` are just a fast first look — `azx` is built to read **your**
+project. Point it at any local repo and it runs the same offline stages 0 → 2.
+
+**Prerequisites:** Node **20+** and npm. No cloud credentials; no Azure or GitHub calls.
+
+```bash
+npm install && npm run build
+npm link                     # puts `azx` on your PATH (once)
+
+# Point it at your app — absolute or relative paths both work:
+azx plan /path/to/your/app
+# ...or without linking:
+node dist/src/cli.js plan ../my-service
+```
+
+**What comes back** (printed to your terminal; nothing is written unless you ask):
+
+- a **signals table** — every detected signal → conclusion → confidence
+- the **App Intent JSON** — the open, capability-shaped contract
+- the resolved **Azure plan** — plain-English resources plus `main.bicep`
+- any **confirmation cards** for guesses `azx` will not make silently
+
+(See the Confidence model, contract, and Capability → Azure mapping sections below for how each is derived.)
+
+**Bring your own policy.** Drop either file in your repo and `azx` picks it up automatically
+during the scan:
+
+- `guardrails.yaml` (repo root) — region allow-list, approved models, spend cap, SKU tier.
+  Guardrails **win** over anything detected in the code.
+- `.azx/subscription.json` — mock Offer ID + spending limit; a `sponsorship` classification
+  defaults to economy SKUs and warns on burn.
+
+```bash
+# Override or point at policy files elsewhere:
+azx plan /path/to/your/app --guardrails guardrails.yaml --subscription .azx/subscription.json
+azx plan /path/to/your/app --json          # machine-readable { intent, plan, bicep }
+```
+
+**When `azx` isn't sure.** Stacks outside the MVP corpus (Next.js / FastAPI / Django ·
+Postgres / pgvector · OpenAI / Anthropic / Azure OpenAI · GitHub Actions) never produce a
+wrong guess — they surface as a **confirmation card** you resolve, or you supply an
+escape-hatch declarative file. Uncertain SKUs and regions are never invented.
+
+> **Dry-run only.** POC #1 never calls Azure. `azx` reads files, prints a plan, and emits
+> Bicep for you to review — `plan` and `apply` stay strictly separate.
+
+---
+
 ## The pipeline (stages 0 → 3)
 
 ```
