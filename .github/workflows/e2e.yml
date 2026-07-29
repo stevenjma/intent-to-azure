@@ -5,12 +5,25 @@
 #
 #   analyzed    azx plan --json runs
 #   plan-match  intent.needs + plan.resources + region == test/e2e/expectations.json
-#   compile     `az bicep build` on the emitted template          (no Azure creds needed)
+#   compile     `az bicep build` on the emitted template          (real compiler, NO Azure login/network)
 #   what-if     `az deployment group what-if` on an ephemeral RG   (only if BYO-Azure repo vars are set)
 #
-# The harness is intentionally GREEN today: two known azx codegen bugs (see
-# test/e2e/README.md) are encoded as expected outcomes. If a bug gets fixed, the
-# matching gate flips and the run FAILS on purpose so expectations.json gets updated.
+# Codegen status: the two azx codegen bugs this harness originally pinned as
+# expected FAILs — the CognitiveServices customSubDomainName BCP057 error and the
+# empty Container Apps / Jobs containers[] — are now FIXED (see src/bicep.ts and
+# test/e2e/README.md). expectations.json therefore expects compile=PASS for every
+# fixture, and the compile gate is the offline proof of those fixes.
+#
+# The only remaining non-PASS expectation is the OPTIONAL what-if gate for
+# next-openai, and that is an Azure model-lifecycle signal (gpt-4o versions
+# retired in the target catalog), NOT a codegen bug — see whatifKnownIssue in
+# expectations.json.
+#
+# By default this workflow makes ZERO real-Azure calls: only `az bicep build`
+# (a local compiler, no login/network) runs. The real-Azure what-if gate is
+# opt-in and DEFERRED to POC #2 — it stays SKIPPED unless BYO-Azure OIDC repo
+# *variables* are set. The shipped POC #1 what-if is the fully offline
+# `azx what-if` CLI command, which never contacts Azure.
 #
 # BYO-Azure (optional, enables the what-if gate): run scripts/setup-azure-oidc.sh
 # (or .ps1) once to create a federated identity and set the three repo *variables*
@@ -55,15 +68,14 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Build azx (public npm registry)
+      - name: Build azx (pinned, public npm registry)
         run: |
-          # The committed root package-lock.json still resolves to an internal feed
-          # that is unreachable from public runners, so we do a fresh, ephemeral
-          # install off registry.npmjs.org instead of `npm ci`. Nothing is committed.
-          # (Once the lockfile is regenerated on poc-1-dry-run-engine, this can become
-          #  `npm ci`.)
-          rm -f package-lock.json
-          npm install --registry=https://registry.npmjs.org/ --no-audit --no-fund
+          # The committed root package-lock.json is regenerated off the public
+          # registry (registry.npmjs.org — enforced by scripts/verify-lockfile.sh +
+          # .github/workflows/lockfile-guard.yml, and pinned by .npmrc), so a
+          # hermetic, pinned `npm ci` works from public runners with clean egress.
+          # Nothing is mutated or committed.
+          npm ci
           npm run build
 
       - name: azx plan
