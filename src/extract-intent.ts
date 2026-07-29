@@ -170,6 +170,25 @@ const CONFIRM_QUESTION: Record<string, string> = {
 /** medium → confirm card; low → ask once. high → applied silently. */
 function buildConfirmations(needs: Need[]): Confirmation[] {
   const confirmations: Confirmation[] = [];
+
+  // Zero-detection escape hatch: an out-of-corpus repo yields no capabilities.
+  // Surface an explicit coverage notice rather than emitting a near-empty plan
+  // with no caveat (README: "Anything outside the MVP corpus surfaces as a
+  // confirmation card or an escape-hatch declarative file — never a silent
+  // wrong guess."). Fully-recognized repos have needs, so this never fires there.
+  if (needs.length === 0) {
+    confirmations.push({
+      id: "coverage:no-detection",
+      question:
+        "azx did not recognize this stack (no known frameworks/databases/AI usage detected). " +
+        "Provide an escape-hatch declarative intent, or confirm the app's needs.",
+      confidence: "low",
+      why: "No capability signals were detected while scanning the repo.",
+      options: ["Provide an escape-hatch declarative intent", "Confirm the app's needs manually"],
+      assumption: "Provide an escape-hatch declarative intent",
+    });
+  }
+
   for (const need of needs) {
     if (need.confidence === "high") continue;
 

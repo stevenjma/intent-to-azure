@@ -18,9 +18,12 @@ The machine-readable schema is [`app-intent.schema.json`](./app-intent.schema.js
 1. **Capability-shaped, not provider-shaped.** The request says *what the app
    needs* (`chat-model`, `transactional-relational`), never *which Azure SKU*.
    Provider resolution is a separate, swappable stage.
-2. **Open & extendable.** `capability` and `options` are open. New capabilities
-   slot in without breaking existing consumers. Unknown values are preserved,
-   never dropped.
+2. **Open & extendable.** `capability` and `options` are open. Adding a new
+   capability **never breaks** existing consumers: unknown values are preserved
+   (not dropped) and existing capabilities keep their safe defaults. Wiring one
+   up end-to-end in the `azx` reference resolver is a separate matter — a
+   deliberate multi-file change (see [§10](#10-how-to-add-a-capability)). The
+   *contract* is extensible; the reference resolver is not automatic.
 3. **Evidence-first.** Every conclusion carries the signals it came from, plus a
    confidence tier. Nothing is asserted without a trail.
 4. **Confirm, don't guess.** Anything below `high` confidence surfaces as a
@@ -109,9 +112,14 @@ card rather than fail.
 
 | Tier | Rule | Behavior |
 |---|---|---|
-| `high` | 2+ **independent** signals (different `kind`) agree | applied silently |
-| `medium` | exactly 1 signal | emit a **confirm** card |
+| `high` | 2+ **independent** signals (different `kind`) agree, **and at least one is non-weak** | applied silently |
+| `medium` | a single non-weak signal — **or** 2+ weak signals of different kinds | emit a **confirm** card |
 | `low` | a lone `weak` signal (or an absence) | **ask once** |
+
+> **The `hasStrong` nuance:** a "strong" (non-`weak`) signal is required to reach
+> `high`. Two *weak* signals of different kinds corroborate only up to `medium`,
+> not `high` — weak hints never promote each other past a confirm card. This is
+> exactly `deriveConfidence()` in `src/confidence.ts`.
 
 Independence is by `SignalKind` (`dependency`, `import`, `env`, `migration`,
 `config`, `framework-file`, `dockerfile`, `ci`, `manifest`). A dependency **and**
@@ -183,3 +191,30 @@ CLI. **POC #1 is generate + preview only — `dryRun: true`, no Azure calls.**
 
 `v0.1` is a preview. Required fields (`version`, `app`, `needs`) are stable;
 engine-added fields may gain properties. Consumers should ignore unknown keys.
+
+---
+
+## 10. How to add a capability
+
+Adding a capability to the **contract** is free (any string is a valid
+`capability`; unknown ones surface as a confirm card and are never dropped).
+Wiring one into the `azx` reference resolver end-to-end is a deliberate change
+that currently touches ~6–8 files. Follow this checklist:
+
+1. **`src/types.ts`** — add the name to the `KnownCapability` union
+   (`~L18–25`). Add any capability-specific `options` interface.
+2. **`src/azure-map.ts`** — add a `buildX()` builder that returns the
+   `AzureResource[]` for the capability.
+3. **`src/plan.ts`** — add a `case` to the `buildResources` switch
+   (`~L116–149`) calling the new builder, and add the name to
+   `RESOLVABLE_CAPABILITIES` so it stops surfacing as "unresolved".
+4. **`src/bicep.ts`** — three places: the `API_VERSIONS` map (`~L11–23`),
+   the SKU block (`~L132–152`), and the properties block (`~L160–289`).
+5. **`src/extract-intent.ts`** — add a `CONFIRM_QUESTION` entry (`~L160–168`)
+   and slot the name into `CAPABILITY_ORDER` (`~L32–40`) for stable output.
+6. **Detection** — teach `src/read-repo.ts` to emit signals for the capability
+   (so the read-repo path can actually detect it), and add a fixture + golden
+   under `examples/` and `test/golden/`.
+
+Miss a step and nothing *breaks* — the capability simply falls through to the
+"unresolved capability" confirm card until the resolver is wired up.

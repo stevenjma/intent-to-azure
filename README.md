@@ -72,7 +72,9 @@ deliberate — anyone can emit the format; `azx` is one implementation.
 - Schema: [`app-intent.schema.json`](./app-intent.schema.json) (JSON Schema draft 2020-12)
 - Human spec: [`SPEC.md`](./SPEC.md)
 
-Capability vocabulary (extendable — new capabilities slot in without breaking existing ones):
+Capability vocabulary (extendable — a new capability never breaks existing ones,
+though wiring one into `azx` end-to-end is a deliberate multi-file change; see
+[SPEC §10](./SPEC.md#10-how-to-add-a-capability)):
 
 `web-compute` · `transactional-relational` (with `branching`, `consistency`) · `chat-model` ·
 `embeddings` · `search-index` · `object-storage` · `background-jobs`
@@ -116,12 +118,15 @@ Every conclusion carries a confidence derived from independent signals:
 
 | Confidence | Rule                                    | Behavior                          |
 | ---------- | --------------------------------------- | --------------------------------- |
-| `high`     | 2+ independent signals agree            | applied silently                  |
-| `medium`   | 1 signal                                | emit a **confirm** card           |
-| `low`      | weak / ambiguous                        | ask once                          |
+| `high`     | 2+ independent signals agree, ≥1 non-weak | applied silently                |
+| `medium`   | 1 non-weak signal, or 2+ weak of different kinds | emit a **confirm** card    |
+| `low`      | a lone weak / ambiguous hint            | ask once                          |
 
-Only `medium`/`low` items surface as confirmations. The full **signal → conclusion → confidence**
-table is always printed so the inference is auditable.
+Only `medium`/`low` items surface as confirmations. A *strong* (non-`weak`)
+signal is required to reach `high`: two weak hints corroborate only up to
+`medium` (see `deriveConfidence()` in `src/confidence.ts`). The full
+**signal → conclusion → confidence** table is always printed so the inference is
+auditable.
 
 ---
 
@@ -175,6 +180,7 @@ COMMANDS
   plan <path>    read repo → extract intent → resolve Azure plan + Bicep (stages 0→2)
   scan <path>    detect the app and print the signals table (stage 0)
   bicep <path>   print just the generated main.bicep
+  what-if <path> offline plan diff vs a prior plan (--against) + approval gate
   up <path>      STUB: print what would deploy (stage 3 — never deploys)
   schema         print the open app-intent.schema.json contract
   help           show this help
