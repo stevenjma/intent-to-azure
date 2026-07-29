@@ -641,6 +641,22 @@ function detectDeployConventions(idx: RepoIndex, push: (s: Signal) => void): voi
       from: azdConfig,
     });
   }
+
+  // Vercel is the most common host for Next.js/Node apps. azx reads a Vercel
+  // project as a *migration source*: the app is web-compute on Vercel today, and
+  // its Azure equivalent is Container Apps. The committed `vercel.json` is the
+  // portable marker; `.vercel/project.json` is the linked-project fallback.
+  const vercelConfig = idx.first("vercel.json", ".vercel/project.json");
+  if (vercelConfig) {
+    push({
+      kind: "config",
+      signal: `${vercelConfig} present (Vercel)`,
+      conclusion: "web-compute (migrating from Vercel → Azure Container Apps)",
+      capability: "web-compute",
+      detail: { deploy: "vercel", from: "vercel", migration: true },
+      from: vercelConfig,
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
