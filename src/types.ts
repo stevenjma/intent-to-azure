@@ -301,6 +301,68 @@ export interface IntentResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Plan diff — the offline "what-if" change set
+// ---------------------------------------------------------------------------
+
+/**
+ * The action a single resource undergoes between a baseline plan and a target
+ * plan. This is the Terraform-plan analog: computed entirely offline by diffing
+ * two azx {@link AzurePlan}s — azx never reads live Azure state, so a diff with
+ * no baseline reports every resource as `create` (honest greenfield).
+ */
+export type ChangeAction = "create" | "modify" | "destroy" | "no-change";
+
+/** A single field that differs between the baseline and target resource. */
+export interface FieldDelta {
+  /** Field name, e.g. `sku`, `region`, `estimatedMonthlyUsd`, `properties`. */
+  field: string;
+  /** Value in the baseline plan (the "before"). */
+  before: unknown;
+  /** Value in the target plan (the "after"). */
+  after: unknown;
+}
+
+/** The change a single resource undergoes, keyed by its stable logical id. */
+export interface ResourceChange {
+  action: ChangeAction;
+  /** Stable logical id ({@link AzureResource.id}) the change is keyed on. */
+  id: string;
+  /** ARM type for display (from the target when present, else the baseline). */
+  type: string;
+  /** Friendly service label for display. */
+  service?: string;
+  /** Field-level deltas — populated only for `modify`. */
+  deltas?: FieldDelta[];
+  /** The resource in the target plan (create / modify / no-change). */
+  after?: AzureResource;
+  /** The resource in the baseline plan (modify / destroy). */
+  before?: AzureResource;
+}
+
+/**
+ * An offline change set between a baseline plan and a freshly-resolved target
+ * plan — the body of `azx what-if`. Deterministic and provider-agnostic.
+ */
+export interface PlanDiff {
+  /** Per-resource changes, in a stable order (creates, modifies, destroys, no-change). */
+  changes: ResourceChange[];
+  /** Roll-up counts for the summary line. */
+  summary: {
+    create: number;
+    modify: number;
+    destroy: number;
+    noChange: number;
+  };
+  /** Region the target plan resolves to. */
+  region: string;
+  /**
+   * Whether the diff was taken against an explicit baseline plan (`--against`)
+   * or an empty greenfield baseline (no prior plan supplied).
+   */
+  baseline: "greenfield" | "plan";
+}
+
+// ---------------------------------------------------------------------------
 // Shared options
 // ---------------------------------------------------------------------------
 

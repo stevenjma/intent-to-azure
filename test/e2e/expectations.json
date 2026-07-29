@@ -1,0 +1,49 @@
+{
+  "_comment": "Expected azx output per E2E fixture. Derived from validated local `azx plan --json` runs, NOT hand-predicted. plan-match (needs + resources + region) is the deterministic contract and must hold exactly. compile/whatif encode the CURRENTLY-KNOWN outcome incl. documented azx codegen bugs; when a bug is fixed and a gate flips, the harness fails on purpose so these expectations get updated to track reality.",
+  "region": "eastus2",
+  "apps": {
+    "next-minimal": {
+      "needs": ["web-compute"],
+      "resources": [
+        { "id": "app-env", "type": "Microsoft.App/managedEnvironments" },
+        { "id": "web", "type": "Microsoft.App/containerApps" }
+      ],
+      "compile": "pass",
+      "whatif": "pass"
+    },
+    "next-prisma-postgres": {
+      "needs": ["web-compute", "transactional-relational"],
+      "resources": [
+        { "id": "app-env", "type": "Microsoft.App/managedEnvironments" },
+        { "id": "web", "type": "Microsoft.App/containerApps" },
+        { "id": "postgres", "type": "Microsoft.DBforPostgreSQL/flexibleServers" },
+        { "id": "postgres-db", "type": "Microsoft.DBforPostgreSQL/flexibleServers/databases" }
+      ],
+      "compile": "pass",
+      "whatif": "pass"
+    },
+    "next-openai": {
+      "needs": ["web-compute", "chat-model"],
+      "resources": [
+        { "id": "app-env", "type": "Microsoft.App/managedEnvironments" },
+        { "id": "web", "type": "Microsoft.App/containerApps" },
+        { "id": "openai", "type": "Microsoft.CognitiveServices/accounts" },
+        { "id": "openai-deploy-gpt-4o", "type": "Microsoft.CognitiveServices/accounts/deployments" }
+      ],
+      "compile": "pass",
+      "whatif": "fail",
+      "whatifKnownIssue": "environment/product signal, not a codegen bug: azx faithfully emits the requested model (gpt-4o, newest grounded version 2024-11-20), but every gpt-4o/gpt-4.1/gpt-4o-mini version is retired/deprecating in this target catalog's clock, so CognitiveServices preflight rejects the deployment. An offline tool cannot track live model lifecycle; the honest options are live catalog lookup, a maintained version map, or omit-and-document. Compile + subdomain + explicit-version fixes are all correct; this gate stays FAIL until the catalog carries a GA gpt-4o (or azx gains live lookup)."
+    },
+    "next-blob-storage": {
+      "needs": ["web-compute", "object-storage"],
+      "resources": [
+        { "id": "app-env", "type": "Microsoft.App/managedEnvironments" },
+        { "id": "web", "type": "Microsoft.App/containerApps" },
+        { "id": "storage", "type": "Microsoft.Storage/storageAccounts" },
+        { "id": "blob", "type": "Microsoft.Storage/storageAccounts/blobServices/containers" }
+      ],
+      "compile": "pass",
+      "whatif": "pass"
+    }
+  }
+}

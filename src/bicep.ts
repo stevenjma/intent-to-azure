@@ -14,11 +14,38 @@ const API_VERSIONS: Record<string, string> = {
   "Microsoft.App/jobs": "2024-03-01",
   "Microsoft.DBforPostgreSQL/flexibleServers": "2024-08-01",
   "Microsoft.DBforPostgreSQL/flexibleServers/databases": "2024-08-01",
+  "Microsoft.DBforPostgreSQL/flexibleServers/configurations": "2024-08-01",
   "Microsoft.CognitiveServices/accounts": "2024-10-01",
   "Microsoft.CognitiveServices/accounts/deployments": "2024-10-01",
   "Microsoft.Search/searchServices": "2023-11-01",
   "Microsoft.Storage/storageAccounts": "2023-05-01",
   "Microsoft.Storage/storageAccounts/blobServices/containers": "2023-05-01",
+};
+
+/**
+ * Pinned Azure OpenAI model versions — newest known GA release per family.
+ *
+ * Omitting the version makes Azure pick its own default, which can already be in
+ * a "deprecating — blocked for new deployments" state and fail preflight with a
+ * cryptic error. Emitting an explicit, pinned version keeps the preview
+ * reproducible and gives the user a concrete value to review/override.
+ *
+ * KNOWN LIMITATION (offline tool): model lifecycle drifts on the live catalog,
+ * so any static map eventually points at a deprecated version. azx faithfully
+ * emits the *requested* model; it does not substitute a different family. If the
+ * requested model has been retired in the target catalog, preflight will reject
+ * it — that is an environment/product signal, not a codegen defect. Long-term
+ * options: live catalog lookup, a maintained map, or omit-and-document.
+ * Models not listed here fall back to the service default version.
+ */
+const MODEL_VERSIONS: Record<string, string> = {
+  "gpt-4o": "2024-11-20",
+  "gpt-4o-mini": "2024-07-18",
+  "gpt-4.1": "2025-04-14",
+  "gpt-4.1-mini": "2025-04-14",
+  "text-embedding-3-large": "1",
+  "text-embedding-3-small": "1",
+  "text-embedding-ada-002": "2",
 };
 
 export function generateBicep(plan: AzurePlan): string {
@@ -44,6 +71,15 @@ export function generateBicep(plan: AzurePlan): string {
   out.push(`@description('Azure region for all resources.')`);
   out.push(`param location string = '${plan.region}'`);
   out.push("");
+  if (plan.resources.some((r) => r.type === "Microsoft.DBforPostgreSQL/flexibleServers")) {
+    out.push(`@description('Administrator login for the PostgreSQL flexible server.')`);
+    out.push(`param postgresAdminLogin string = 'pgadmin'`);
+    out.push("");
+    out.push(`@secure()`);
+    out.push(`@description('Administrator password for the PostgreSQL flexible server. Provide at deploy time.')`);
+    out.push(`param postgresAdminPassword string`);
+    out.push("");
+  }
 
   for (const r of plan.resources) {
     out.push(...emitResource(r, idToSymbol, idToName));
@@ -139,8 +175,18 @@ function propertiesBlock(r: AzureResource, idToSymbol: Map<string, string>): str
         "    }",
         "  }",
         "  template: {",
-        "    scale: {",
-        `      minReplicas: ${scale.minReplicas ?? 0}`,
+          "    containers: [",
+          "      {",
+          "        name: 'app'",
+          "        image: 'mcr.microsoft.com/k8se/quickstart:latest'",
+          "        resources: {",
+          "          cpu: json('0.5')",
+          "          memory: '1.0Gi'",
+          "        }",
+          "      }",
+          "    ]",
+          "    scale: {",
+          `      minReplicas: ${scale.minReplicas ?? 0}`,
         `      maxReplicas: ${scale.maxReplicas ?? 3}`,
         "    }",
         "  }",
@@ -154,9 +200,22 @@ function propertiesBlock(r: AzureResource, idToSymbol: Map<string, string>): str
         ...(envSym ? [`  environmentId: ${envSym}.id`] : []),
         "  configuration: {",
         "    triggerType: 'Schedule'",
+        "    replicaTimeout: 1800",
         "    scheduleTriggerConfig: {",
         "      cronExpression: '0 * * * *'",
         "    }",
+        "  }",
+        "  template: {",
+        "    containers: [",
+        "      {",
+        "        name: 'job'",
+        "        image: 'mcr.microsoft.com/k8se/quickstart-jobs:latest'",
+        "        resources: {",
+        "          cpu: json('0.5')",
+        "          memory: '1.0Gi'",
+        "        }",
+        "      }",
+        "    ]",
         "  }",
         "}",
       ];
@@ -164,10 +223,11 @@ function propertiesBlock(r: AzureResource, idToSymbol: Map<string, string>): str
     case "Microsoft.DBforPostgreSQL/flexibleServers": {
       const storageGb = numProp(r, "storageGb", 32);
       const version = strProp(r, "version", "16");
-      const pgvector = Array.isArray(r.properties?.extensions);
-      const lines = [
+      return [
         "properties: {",
         `    version: '${version}'`,
+        "    administratorLogin: postgresAdminLogin",
+        "    administratorLoginPassword: postgresAdminPassword",
         "    storage: {",
         `      storageSizeGB: ${storageGb}`,
         "    }",
@@ -176,27 +236,30 @@ function propertiesBlock(r: AzureResource, idToSymbol: Map<string, string>): str
         "    }",
         "}",
       ];
-      if (pgvector) {
-        lines.unshift("// pgvector: also add a flexibleServers/configurations resource setting azure.extensions = 'VECTOR'.");
-      }
-      return lines;
     }
     case "Microsoft.DBforPostgreSQL/flexibleServers/databases":
       return ["properties: {", "  charset: 'UTF8'", "  collation: 'en_US.utf8'", "}"];
+    case "Microsoft.DBforPostgreSQL/flexibleServers/configurations": {
+      const value = strProp(r, "value", "VECTOR");
+      const source = strProp(r, "source", "user-override");
+      return ["properties: {", `  value: '${value}'`, `  source: '${source}'`, "}"];
+    }
     case "Microsoft.CognitiveServices/accounts":
       return [
         "properties: {",
         "  publicNetworkAccess: 'Enabled'",
-        "  customSubDomainName: name",
+        `  customSubDomainName: '${r.name}'`,
         "}",
       ];
     case "Microsoft.CognitiveServices/accounts/deployments": {
       const model = strProp(r, "model", "gpt-4o");
+      const version = MODEL_VERSIONS[model];
       return [
         "properties: {",
         "  model: {",
         "    format: 'OpenAI'",
         `    name: '${model}'`,
+        ...(version ? [`    version: '${version}'`] : []),
         "  }",
         "}",
       ];
