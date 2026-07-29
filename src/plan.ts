@@ -173,8 +173,32 @@ function materializeNames(resources: AzureResource[], appName: string): void {
       r.name = storageToken;
     } else {
       r.name = r.name.replace(/\$\{appName\}/g, slug);
+      // Container Apps and Jobs names must be <=32 chars (lowercase alnum/hyphen,
+      // start letter, end alnum). Clamp deterministically with a stable hash suffix.
+      if (r.type === "Microsoft.App/containerApps" || r.type === "Microsoft.App/jobs") {
+        r.name = clampName(r.name, 32);
+      }
     }
   }
+}
+
+/** Deterministically shorten a name to `limit` chars, appending a stable hash suffix. */
+function clampName(name: string, limit: number): string {
+  if (name.length <= limit) return name;
+  const suffix = fnv1a(name).toString(36).slice(0, 6);
+  const keep = Math.max(1, limit - 1 - suffix.length);
+  const head = name.slice(0, keep).replace(/-+$/g, "") || name.slice(0, 1);
+  return `${head}-${suffix}`;
+}
+
+/** FNV-1a 32-bit hash (dependency-free, deterministic). */
+function fnv1a(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h >>> 0;
 }
 
 // ---------------------------------------------------------------------------

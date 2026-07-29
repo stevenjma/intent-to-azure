@@ -6,16 +6,17 @@
  *   azx plan  <path>   stages 0→2: signals table, App Intent JSON, Azure plan + Bicep, confirms
  *   azx scan  <path>   stage 0 only: detected app + signals table
  *   azx bicep <path>   print (or --out) just the generated main.bicep
+ *   azx what-if <path> offline plan diff vs a prior plan (--against) + approval gate
  *   azx up    <path>   stage 3 STUB: prints what *would* deploy — never deploys
  *   azx schema         print the app-intent.schema.json (open contract)
  *   azx help
  *
  * Flags: --json  --guardrails <file>  --subscription <file>  --out <file>
- *        --no-bicep  --no-color
+ *        --no-bicep  --no-color  --against <plan.json>  --yes
  */
 
 import { parseArgs } from "node:util";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, readSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { basename, resolve } from "node:path";
 
@@ -26,13 +27,16 @@ import { loadBudget, normalizeBudget } from "./budget.js";
 import { plan as planIntent } from "./plan.js";
 import { generateBicep } from "./bicep.js";
 import { dryRun } from "./run.js";
-import type { AppIntent, AzurePlan, Confirmation, Guardrails, BudgetContext, Confidence } from "./types.js";
+import { diffPlans } from "./diff.js";
+import type { AppIntent, AzurePlan, ChangeAction, Confirmation, Guardrails, BudgetContext, Confidence, PlanDiff } from "./types.js";
 
 interface Values {
   json?: boolean;
   guardrails?: string;
   subscription?: string;
   out?: string;
+  against?: string;
+  yes?: boolean;
   "no-bicep"?: boolean;
   "no-color"?: boolean;
   help?: boolean;
@@ -50,6 +54,8 @@ function main(argv: string[]): number {
         guardrails: { type: "string" },
         subscription: { type: "string" },
         out: { type: "string" },
+        against: { type: "string" },
+        yes: { type: "boolean" },
         "no-bicep": { type: "boolean" },
         "no-color": { type: "boolean" },
         help: { type: "boolean", short: "h" },
@@ -87,6 +93,9 @@ function main(argv: string[]): number {
         return cmdPlan(repoArg, values, color);
       case "bicep":
         return cmdBicep(repoArg, values, color);
+      case "what-if":
+      case "whatif":
+        return cmdWhatIf(repoArg, values, color);
       case "up":
         return cmdUp(repoArg, values, color);
       case "schema":
@@ -183,6 +192,121 @@ function cmdBicep(repoArg: string, values: Values, _c: Color): number {
     process.stdout.write(bicep);
   }
   return 0;
+}
+
+/**
+ * `azx what-if <path> [--against prev.json] [--yes] [--json]`
+ *
+ * Offline plan diff + approval gate. With no --against this is an honest
+ * greenfield preview (everything is a `create`); with --against it diffs the
+ * freshly resolved plan against a previously-saved azx plan. Never calls Azure —
+ * approval simply hands off to the same `up` dry-run stub.
+ */
+function cmdWhatIf(repoArg: string, values: Values, c: Color): number {
+  const root = resolve(repoArg);
+  const { plan, bicep } = buildAll(root, values);
+
+  const baseline = values.against ? loadBaselinePlan(values.against) : null;
+  const diff = diffPlans(baseline, plan);
+  const blocked = plan.budget.blocked;
+
+  if (values.json) {
+    const approved = !!values.yes && !blocked;
+    const decision = {
+      approved,
+      reason: blocked
+        ? "blocked by budget guardrail"
+        : approved
+          ? "auto-approved via --yes"
+          : "not approved (pass --yes to approve)",
+    };
+    process.stdout.write(JSON.stringify({ plan, diff, decision }, null, 2) + "\n");
+    return blocked ? 1 : 0;
+  }
+
+  process.stdout.write(
+    banner(c, `what-if ${basename(root)}  ${c.dim("(offline plan diff · no Azure calls)")}`),
+  );
+  process.stdout.write(renderDiff(diff, c));
+
+  // Budget guardrail is a hard stop: report and refuse without prompting.
+  if (blocked) {
+    process.stdout.write("\n" + c.red("✗ Blocked by budget guardrail — not approvable.") + "\n");
+    for (const w of plan.budget.warnings) process.stdout.write("  " + c.yellow("⚠ " + w) + "\n");
+    return 1;
+  }
+
+  const decision = decideApproval(values);
+  if (!decision.approved) {
+    process.stdout.write("\n" + c.dim(decision.reason) + "\n");
+    return 0;
+  }
+
+  process.stdout.write(
+    "\n" + c.bold("Approved.") + c.dim(" Handing off to dry-run (still no Azure calls)…") + "\n",
+  );
+  const result = dryRun(plan, bicep);
+  for (const step of result.steps) {
+    const line = step.startsWith("  ") ? c.dim(step) : step;
+    process.stdout.write(line + "\n");
+  }
+  return result.blocked ? 1 : 0;
+}
+
+/** Load a baseline plan from --against; accepts a raw AzurePlan or `azx plan --json`. */
+function loadBaselinePlan(file: string): AzurePlan {
+  const raw = JSON.parse(readFileSync(resolve(file), "utf8")) as unknown;
+  if (raw && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj.resources)) return raw as AzurePlan;
+    const nested = obj.plan as Record<string, unknown> | undefined;
+    if (nested && Array.isArray(nested.resources)) return nested as unknown as AzurePlan;
+  }
+  throw new Error(
+    `--against file '${file}' is not an azx plan (expected .resources or .plan.resources)`,
+  );
+}
+
+/**
+ * Resolve the approval decision without ever hanging in automation.
+ * --yes auto-approves; a real TTY on both stdin+stdout gets an interactive
+ * prompt; anything else (pipes, CI, --json handled earlier) declines cleanly.
+ */
+function decideApproval(values: Values): { approved: boolean; reason: string } {
+  if (values.yes) return { approved: true, reason: "auto-approved via --yes" };
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    return promptYesNo("Apply this plan? [y/N] ")
+      ? { approved: true, reason: "approved interactively" }
+      : { approved: false, reason: "Not approved." };
+  }
+  return {
+    approved: false,
+    reason: "Not approved (non-interactive; pass --yes to approve).",
+  };
+}
+
+/** Synchronous [y/N] prompt read from fd 0. Only reached on a real TTY. */
+function promptYesNo(prompt: string): boolean {
+  process.stdout.write(prompt);
+  const buf = Buffer.alloc(256);
+  let input = "";
+  try {
+    while (!input.includes("\n")) {
+      let bytes = 0;
+      try {
+        bytes = readSync(0, buf, 0, buf.length, null);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EAGAIN") continue;
+        return false;
+      }
+      if (bytes === 0) break;
+      input += buf.toString("utf8", 0, bytes);
+    }
+  } catch {
+    return false;
+  }
+  const answer = input.trim().toLowerCase();
+  return answer === "y" || answer === "yes";
 }
 
 function cmdUp(repoArg: string, values: Values, c: Color): number {
@@ -311,6 +435,71 @@ function renderConfirmations(confirmations: Confirmation[], c: Color): string {
   return lines.join("\n") + "\n";
 }
 
+function renderDiff(diff: PlanDiff, c: Color): string {
+  const sym: Record<ChangeAction, string> = {
+    create: "+",
+    modify: "~",
+    destroy: "-",
+    "no-change": " ",
+  };
+  const paint = (action: ChangeAction, s: string): string => {
+    if (action === "create") return c.green(s);
+    if (action === "modify") return c.yellow(s);
+    if (action === "destroy") return c.red(s);
+    return c.dim(s);
+  };
+
+  const lines: string[] = [];
+  const baselineLabel =
+    diff.baseline === "greenfield" ? "greenfield (no prior plan)" : "prior plan";
+  lines.push("  " + c.dim(`baseline: ${baselineLabel} · region ${diff.region}`));
+  lines.push("");
+
+  const shown = diff.changes.filter((ch) => ch.action !== "no-change");
+  if (shown.length === 0) {
+    lines.push("  " + c.dim("No changes. Target plan matches the baseline."));
+  }
+  for (const ch of shown) {
+    lines.push("  " + paint(ch.action, sym[ch.action]) + " " + ch.id + "  " + c.dim(ch.type));
+    if (ch.action === "modify" && ch.deltas) {
+      for (const d of ch.deltas) {
+        lines.push(
+          "      " +
+            c.dim(d.field + ": ") +
+            formatDeltaVal(d.before) +
+            c.dim(" → ") +
+            formatDeltaVal(d.after),
+        );
+      }
+    }
+  }
+
+  if (diff.summary.noChange > 0) {
+    lines.push("  " + c.dim(`(${diff.summary.noChange} unchanged)`));
+  }
+
+  const s = diff.summary;
+  lines.push("");
+  lines.push(
+    "  " +
+      c.bold("Plan: ") +
+      c.green(`+${s.create} to create`) +
+      ", " +
+      c.yellow(`~${s.modify} to change`) +
+      ", " +
+      c.red(`-${s.destroy} to destroy`),
+  );
+  return lines.join("\n") + "\n";
+}
+
+function formatDeltaVal(v: unknown): string {
+  if (v === undefined) return "(none)";
+  if (v === null) return "null";
+  if (typeof v === "string") return `"${v}"`;
+  if (typeof v === "object") return truncate(JSON.stringify(v), 60);
+  return String(v);
+}
+
 function confidenceByCapability(intent: AppIntent): Map<string, Confidence> {
   const m = new Map<string, Confidence>();
   for (const need of intent.needs) m.set(String(need.capability), need.confidence);
@@ -392,6 +581,7 @@ function printUsage(): void {
       "  plan <path>    read repo → extract intent → resolve Azure plan + Bicep (stages 0→2)",
       "  scan <path>    detect the app and print the signals table (stage 0)",
       "  bicep <path>   print just the generated main.bicep",
+      "  what-if <path> offline plan diff vs a prior plan (--against) + approval gate",
       "  up <path>      STUB: print what would deploy (stage 3 — never deploys)",
       "  schema         print the open app-intent.schema.json contract",
       "  help           show this help",
@@ -400,6 +590,8 @@ function printUsage(): void {
       "  --json                 machine-readable output",
       "  --guardrails <file>    apply a guardrails.yaml (policy wins over repo)",
       "  --subscription <file>  budget context (mock subscription.json)",
+      "  --against <plan.json>  what-if: baseline plan to diff against (azx plan --json)",
+      "  --yes                  what-if: auto-approve without the interactive prompt",
       "  --out <file>           write Bicep/schema to a file",
       "  --no-bicep             omit the Bicep block from 'plan' output",
       "  --no-color             disable ANSI color",

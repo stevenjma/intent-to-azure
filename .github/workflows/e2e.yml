@@ -1,0 +1,147 @@
+# azx end-to-end harness.
+#
+# Throws real, committed Next.js app trees (test/e2e/apps/*) at azx and proves each
+# stage with a DISTINCT gate:
+#
+#   analyzed    azx plan --json runs
+#   plan-match  intent.needs + plan.resources + region == test/e2e/expectations.json
+#   compile     `az bicep build` on the emitted template          (real compiler, NO Azure login/network)
+#   what-if     `az deployment group what-if` on an ephemeral RG   (only if BYO-Azure repo vars are set)
+#
+# Codegen status: the two azx codegen bugs this harness originally pinned as
+# expected FAILs — the CognitiveServices customSubDomainName BCP057 error and the
+# empty Container Apps / Jobs containers[] — are now FIXED (see src/bicep.ts and
+# test/e2e/README.md). expectations.json therefore expects compile=PASS for every
+# fixture, and the compile gate is the offline proof of those fixes.
+#
+# The only remaining non-PASS expectation is the OPTIONAL what-if gate for
+# next-openai, and that is an Azure model-lifecycle signal (gpt-4o versions
+# retired in the target catalog), NOT a codegen bug — see whatifKnownIssue in
+# expectations.json.
+#
+# By default this workflow makes ZERO real-Azure calls: only `az bicep build`
+# (a local compiler, no login/network) runs. The real-Azure what-if gate is
+# opt-in and DEFERRED to POC #2 — it stays SKIPPED unless BYO-Azure OIDC repo
+# *variables* are set. The shipped POC #1 what-if is the fully offline
+# `azx what-if` CLI command, which never contacts Azure.
+#
+# BYO-Azure (optional, enables the what-if gate): run scripts/setup-azure-oidc.sh
+# (or .ps1) once to create a federated identity and set the three repo *variables*
+# AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID. No client secret is stored.
+
+name: e2e
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - "test/e2e/**"
+      - ".github/workflows/e2e.yml"
+      - "src/**"
+
+permissions:
+  id-token: write   # OIDC for azure/login (what-if gate)
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - next-minimal
+          - next-prisma-postgres
+          - next-openai
+          - next-blob-storage
+    env:
+      APP: ${{ matrix.app }}
+      REGION: eastus2
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build azx (pinned, public npm registry)
+        run: |
+          # The committed root package-lock.json is regenerated off the public
+          # registry (registry.npmjs.org — enforced by scripts/verify-lockfile.sh +
+          # .github/workflows/lockfile-guard.yml, and pinned by .npmrc), so a
+          # hermetic, pinned `npm ci` works from public runners with clean egress.
+          # Nothing is mutated or committed.
+          npm ci
+          npm run build
+
+      - name: azx plan
+        run: node dist/src/cli.js plan "test/e2e/apps/$APP" --json > "plan-$APP.json"
+
+      - name: azx bicep
+        run: node dist/src/cli.js bicep "test/e2e/apps/$APP" --out "main-$APP.bicep"
+
+      - name: Compile gate (az bicep build)
+        id: compile
+        run: |
+          az bicep install >/dev/null 2>&1 || true
+          if az bicep build --file "main-$APP.bicep" --stdout > "arm-$APP.json" 2> "bicep-$APP.err"; then
+            echo "compile=pass" >> "$GITHUB_OUTPUT"
+            echo "::notice title=compile $APP::PASS"
+          else
+            echo "compile=fail" >> "$GITHUB_OUTPUT"
+            echo "::warning title=compile $APP::FAIL"; sed -n '1,5p' "bicep-$APP.err" || true
+          fi
+
+      - name: Azure login (OIDC, optional)
+        id: login
+        if: ${{ vars.AZURE_CLIENT_ID != '' && steps.compile.outputs.compile == 'pass' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What-if gate (ephemeral RG)
+        id: whatif
+        if: ${{ steps.login.outcome == 'success' }}
+        run: |
+          RG="azx-e2e-$APP-${GITHUB_RUN_ID}"
+          echo "rg=$RG" >> "$GITHUB_OUTPUT"
+          az group create -n "$RG" -l "$REGION" --tags azx-e2e=1 ttl=2h >/dev/null
+          if az deployment group what-if -g "$RG" --template-file "main-$APP.bicep" --no-pretty-print > "whatif-$APP.txt" 2>&1; then
+            echo "whatif=pass" >> "$GITHUB_OUTPUT"
+            echo "::notice title=what-if $APP::PASS"
+          else
+            echo "whatif=fail" >> "$GITHUB_OUTPUT"
+            echo "::warning title=what-if $APP::FAIL"; sed -n '1,8p' "whatif-$APP.txt" || true
+          fi
+
+      - name: Delete ephemeral RG
+        if: ${{ always() && steps.whatif.outputs.rg != '' }}
+        run: az group delete -n "${{ steps.whatif.outputs.rg }}" --yes --no-wait || true
+
+      - name: Reconcile gates (assert)
+        run: |
+          node test/e2e/assert.mjs \
+            --app "$APP" \
+            --plan "plan-$APP.json" \
+            --compile "${{ steps.compile.outputs.compile }}" \
+            --whatif "${{ steps.whatif.outputs.whatif || 'skip' }}"
+
+      - name: Upload artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: azx-e2e-${{ matrix.app }}
+          path: |
+            plan-${{ matrix.app }}.json
+            main-${{ matrix.app }}.bicep
+            arm-${{ matrix.app }}.json
+            bicep-${{ matrix.app }}.err
+            whatif-${{ matrix.app }}.txt
+          if-no-files-found: ignore
+          retention-days: 7

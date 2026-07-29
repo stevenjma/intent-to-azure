@@ -104,7 +104,22 @@ export function buildRelational(need: Need, ctx: MapContext): AzureResource[] {
     dependsOn: ["postgres"],
     estimatedMonthlyUsd: 0,
   };
-  return [server, db];
+  const resources: AzureResource[] = [server, db];
+  if (pgvector) {
+    resources.push({
+      id: "postgres-ext",
+      name: "azure.extensions",
+      type: "Microsoft.DBforPostgreSQL/flexibleServers/configurations",
+      service: "PostgreSQL Server Configuration",
+      region: ctx.region,
+      capability: "transactional-relational",
+      dependsOn: ["postgres"],
+      estimatedMonthlyUsd: 0,
+      notes: ["Allowlists the pgvector extension at the server level (azure.extensions = VECTOR)."],
+      properties: { value: "VECTOR", source: "user-override" },
+    });
+  }
+  return resources;
 }
 
 export function buildChatModel(need: Need, ctx: MapContext, approvedModels?: string[]): AzureResource[] {
