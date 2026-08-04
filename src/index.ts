@@ -46,6 +46,15 @@ export { diffPlans } from "./diff.js";
 export { DryRunDeployer, dryRun } from "./run.js";
 export type { Deployer, RunOptions, RunResult } from "./run.js";
 
+export { buildScaffold, resourceGroupFor, slugify } from "./scaffold.js";
+export type { ScaffoldFile, ScaffoldOptions } from "./scaffold.js";
+
+export { shipSteps, runShip, shipOutDir } from "./ship.js";
+export type { ShipStep, ShipOptions, ShipPlan, ShipResult, CommandRunner } from "./ship.js";
+
+export { runLocalDeploy, planNeedsPgPassword, defaultAzRunner } from "./az-deploy.js";
+export type { AzRunner, AzResult, LocalDeployOptions, LocalDeployResult } from "./az-deploy.js";
+
 import { readRepo } from "./read-repo.js";
 import { extractIntent, type ExtractOptions } from "./extract-intent.js";
 import { loadGuardrails } from "./guardrails.js";

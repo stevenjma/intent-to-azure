@@ -16,9 +16,10 @@
  */
 
 import { parseArgs } from "node:util";
-import { readFileSync, writeFileSync, readSync } from "node:fs";
+import { readFileSync, writeFileSync, readSync, mkdirSync, mkdtempSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { basename, resolve } from "node:path";
+import { basename, resolve, join, dirname } from "node:path";
+import { tmpdir } from "node:os";
 
 import { readRepo, type RepoScan } from "./read-repo.js";
 import { extractIntent } from "./extract-intent.js";
@@ -28,13 +29,25 @@ import { plan as planIntent } from "./plan.js";
 import { generateBicep } from "./bicep.js";
 import { dryRun } from "./run.js";
 import { diffPlans } from "./diff.js";
-import type { AppIntent, AzurePlan, ChangeAction, Confirmation, Guardrails, BudgetContext, Confidence, PlanDiff } from "./types.js";
+import { buildScaffold, resourceGroupFor, type ScaffoldFile } from "./scaffold.js";
+import { shipSteps, runShip, type ShipStep } from "./ship.js";
+import { runLocalDeploy } from "./az-deploy.js";
+import type { AppIntent, AzurePlan, ChangeAction, Confirmation, Guardrails, BudgetContext, Confidence, PlanDiff, DeployLedger } from "./types.js";
 
 interface Values {
   json?: boolean;
   guardrails?: string;
   subscription?: string;
   out?: string;
+  scaffold?: string;
+  "create-repo"?: string;
+  deploy?: boolean;
+  private?: boolean;
+  "local-deploy"?: boolean;
+  "resource-group"?: string;
+  region?: string;
+  "pg-password"?: string;
+  "subscription-id"?: string;
   against?: string;
   yes?: boolean;
   "no-bicep"?: boolean;
@@ -54,6 +67,15 @@ function main(argv: string[]): number {
         guardrails: { type: "string" },
         subscription: { type: "string" },
         out: { type: "string" },
+        scaffold: { type: "string" },
+        "create-repo": { type: "string" },
+        deploy: { type: "boolean" },
+        private: { type: "boolean" },
+        "local-deploy": { type: "boolean" },
+        "resource-group": { type: "string" },
+        region: { type: "string" },
+        "pg-password": { type: "string" },
+        "subscription-id": { type: "string" },
         against: { type: "string" },
         yes: { type: "boolean" },
         "no-bicep": { type: "boolean" },
@@ -98,6 +120,8 @@ function main(argv: string[]): number {
         return cmdWhatIf(repoArg, values, color);
       case "up":
         return cmdUp(repoArg, values, color);
+      case "ship":
+        return cmdShip(repoArg, values, color);
       case "schema":
         return cmdSchema(values);
       default:
@@ -161,8 +185,18 @@ function cmdPlan(repoArg: string, values: Values, c: Color): number {
 
   if (values.out) writeFileSync(resolve(values.out), bicep);
 
+  // --scaffold writes the ENTIRE deployable repo tree (Bicep + CI/CD pipeline)
+  // to disk as inert code — the "all the code, not tied to a live repo" mode.
+  let scaffoldFiles: ScaffoldFile[] | undefined;
+  if (values.scaffold) {
+    scaffoldFiles = buildScaffold(intent, plan, bicep, { ledger: loadLedger(root) });
+    writeScaffold(resolve(values.scaffold), scaffoldFiles);
+  }
+
   if (values.json) {
-    process.stdout.write(JSON.stringify({ intent, plan, bicep }, null, 2) + "\n");
+    const payload: Record<string, unknown> = { intent, plan, bicep };
+    if (scaffoldFiles) payload.scaffold = scaffoldFiles;
+    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
     return 0;
   }
 
@@ -179,6 +213,14 @@ function cmdPlan(repoArg: string, values: Values, c: Color): number {
     process.stdout.write(c.dim(hr()) + "\n" + bicep + c.dim(hr()) + "\n");
   }
   if (values.out) process.stdout.write(c.dim(`\nBicep written to ${resolve(values.out)}\n`));
+  if (scaffoldFiles) {
+    process.stdout.write(
+      c.dim(`\nScaffold (${scaffoldFiles.length} files) written to ${resolve(values.scaffold!)}\n`),
+    );
+    process.stdout.write(
+      c.dim(`  Ship it live with: azx ship ${basename(root)} --create-repo <owner/name>\n`),
+    );
+  }
   return 0;
 }
 
@@ -311,7 +353,14 @@ function promptYesNo(prompt: string): boolean {
 
 function cmdUp(repoArg: string, values: Values, c: Color): number {
   const root = resolve(repoArg);
-  const { plan, bicep } = buildAll(root, values);
+  const { intent, plan, bicep } = buildAll(root, values);
+
+  // --local-deploy: the imperative "inner loop" — really create Azure resources
+  // via `az` (what-if gated). Everything else stays the offline dry-run stub.
+  if (values["local-deploy"]) {
+    return cmdLocalDeploy(root, intent, plan, bicep, values, c);
+  }
+
   const result = dryRun(plan, bicep);
   if (values.json) {
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
@@ -322,7 +371,208 @@ function cmdUp(repoArg: string, values: Values, c: Color): number {
     const line = step.startsWith("  ") ? c.dim(step) : step;
     process.stdout.write(line + "\n");
   }
+  process.stdout.write(
+    c.dim("\nTip: `azx up <path> --local-deploy` really deploys to Azure (needs `az login`).\n"),
+  );
   return result.blocked ? 1 : 0;
+}
+
+/**
+ * `azx up <path> --local-deploy [--yes] [--resource-group r] [--region x]
+ *                               [--pg-password p] [--subscription-id id]`
+ *
+ * The imperative inner loop: `az` really creates the resources. What-if is always
+ * previewed first; the real apply only happens with --yes. On success it writes
+ * `.azx/deploy.json` — the continuity ledger `azx ship` adopts to codify this
+ * same deployment into a reviewed CI/CD pipeline.
+ */
+function cmdLocalDeploy(
+  root: string,
+  intent: AppIntent,
+  plan: AzurePlan,
+  bicep: string,
+  values: Values,
+  c: Color,
+): number {
+  if (plan.budget.blocked) {
+    process.stdout.write(banner(c, `deploy ${intent.app.name}`));
+    process.stdout.write(c.red("\n✗ Blocked by budget guardrail — refusing to deploy.\n"));
+    for (const w of plan.budget.warnings) process.stdout.write("  " + c.yellow("⚠ " + w) + "\n");
+    return 1;
+  }
+
+  const rg = values["resource-group"] ?? resourceGroupFor(intent);
+  const region = values.region ?? plan.region;
+  const apply = !!values.yes;
+
+  // The `az deployment` calls need main.bicep on disk. Write it to a throwaway
+  // temp dir so we never pollute the user's repo; only the ledger lands in .azx/.
+  const bicepPath = join(mkdtempSync(join(tmpdir(), "azx-deploy-")), "main.bicep");
+  writeFileSync(bicepPath, bicep);
+
+  let result;
+  try {
+    result = runLocalDeploy(plan, {
+      bicepPath,
+      resourceGroup: rg,
+      region,
+      subscriptionId: values["subscription-id"],
+      pgPassword: values["pg-password"],
+      apply,
+    });
+  } catch (err) {
+    if (values.json) {
+      process.stdout.write(JSON.stringify({ error: (err as Error).message }, null, 2) + "\n");
+    } else {
+      process.stdout.write(banner(c, `deploy ${intent.app.name}`));
+      process.stdout.write("\n" + c.red("✗ " + (err as Error).message) + "\n");
+    }
+    return 1;
+  }
+
+  // Persist the ledger on a real apply so `ship` can adopt this deployment.
+  let ledgerPath: string | undefined;
+  if (result.ledger) {
+    const azxDir = join(root, ".azx");
+    mkdirSync(azxDir, { recursive: true });
+    ledgerPath = join(azxDir, "deploy.json");
+    writeFileSync(ledgerPath, JSON.stringify(result.ledger, null, 2) + "\n");
+  }
+
+  if (values.json) {
+    process.stdout.write(JSON.stringify({ ...result, ledgerPath }, null, 2) + "\n");
+    return 0;
+  }
+
+  const mode = result.applied ? c.dim("(live · resources created)") : c.dim("(what-if only)");
+  process.stdout.write(banner(c, `deploy ${intent.app.name}  ${mode}`));
+  process.stdout.write(c.dim(`  resource group ${rg} · region ${region}\n\n`));
+  for (const step of result.steps) {
+    process.stdout.write("  " + c.green("✓") + " " + step + "\n");
+  }
+  if (result.applied) {
+    process.stdout.write("\n" + c.bold("Deployed.") + " Real Azure resources are live.\n");
+    if (ledgerPath) process.stdout.write(c.dim(`  ledger written to ${ledgerPath}\n`));
+    process.stdout.write(
+      c.dim(`  Harden it into a reviewed pipeline: azx ship ${basename(root)} --create-repo <owner/name>\n`),
+    );
+  } else {
+    process.stdout.write("\n" + c.dim("What-if only — re-run with --yes to create the resources.\n"));
+  }
+  return 0;
+}
+
+/** Load a local-deploy ledger from `<root>/.azx/deploy.json`, if one exists. */
+function loadLedger(root: string): DeployLedger | undefined {
+  const p = join(root, ".azx", "deploy.json");
+  try {
+    return JSON.parse(readFileSync(p, "utf8")) as DeployLedger;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `azx ship <path> [--create-repo owner/name] [--deploy] [--private] [--out dir]`
+ *
+ * The "source repo + CI/CD" mode. Builds the full scaffold (Bicep + deploy
+ * pipeline), then:
+ *   - default (no --create-repo): DRY RUN. Writes the scaffold to --out (or a
+ *     repo-named dir) and prints the exact git/gh commands it *would* run.
+ *   - --create-repo owner/name: creates + pushes a real GitHub repo via `gh`;
+ *     with --deploy, also triggers the workflow so the pipeline does the real
+ *     Azure deploy (via OIDC). azx itself still makes zero Azure calls.
+ */
+function cmdShip(repoArg: string, values: Values, c: Color): number {
+  const root = resolve(repoArg);
+  const { intent, plan, bicep } = buildAll(root, values);
+
+  const shipOpts = {
+    repo: values["create-repo"],
+    visibility: (values.private === false ? "public" : "private") as "public" | "private",
+    deploy: values.deploy,
+    outDir: values.out,
+    ledger: loadLedger(root),
+  };
+
+  // Budget block is a hard stop: never ship a plan a guardrail refused.
+  if (plan.budget.blocked) {
+    if (values.json) {
+      process.stdout.write(
+        JSON.stringify({ error: "blocked by budget guardrail", warnings: plan.budget.warnings }, null, 2) + "\n",
+      );
+    } else {
+      process.stdout.write(banner(c, `ship ${intent.app.name}`));
+      process.stdout.write(c.red("\n✗ Blocked by budget guardrail — refusing to ship.\n"));
+      for (const w of plan.budget.warnings) process.stdout.write("  " + c.yellow("⚠ " + w) + "\n");
+    }
+    return 1;
+  }
+
+  const execute = !!values["create-repo"];
+
+  if (execute) {
+    const result = runShip(intent, plan, bicep, shipOpts);
+    if (values.json) {
+      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+      return 0;
+    }
+    process.stdout.write(banner(c, `ship ${intent.app.name}  ${c.dim("(live)")}`));
+    process.stdout.write(c.dim(`  scaffold written to ${result.outDir}\n`));
+    for (const step of result.steps) {
+      process.stdout.write("  " + c.green("✓") + " " + step.description + "\n");
+    }
+    process.stdout.write(
+      "\n" + c.bold("Shipped.") + " The deploy pipeline now owns the real Azure deployment.\n",
+    );
+    if (!values.deploy) {
+      process.stdout.write(
+        c.dim(`  Trigger it with: gh workflow run deploy.yml --repo ${values["create-repo"]}\n`),
+      );
+    }
+    return 0;
+  }
+
+  // Dry run: plan the steps, write scaffold if --out given, print what would run.
+  const planned = shipSteps(intent, plan, bicep, shipOpts);
+  if (values.out) writeScaffold(planned.outDir, planned.files);
+
+  if (values.json) {
+    process.stdout.write(JSON.stringify({ ...planned, executed: false }, null, 2) + "\n");
+    return 0;
+  }
+
+  process.stdout.write(banner(c, `ship ${intent.app.name}  ${c.dim("(dry-run — no repo created)")}`));
+  process.stdout.write("\n" + c.bold("Scaffold\n"));
+  for (const f of planned.files) process.stdout.write("  " + c.dim("•") + " " + f.path + "\n");
+  if (values.out) process.stdout.write(c.dim(`\n  written to ${planned.outDir}\n`));
+
+  process.stdout.write("\n" + c.bold("Would run\n"));
+  for (const step of planned.steps) {
+    process.stdout.write("  " + c.dim("$ ") + renderStep(step) + "\n");
+    process.stdout.write("      " + c.dim(step.description) + "\n");
+  }
+  process.stdout.write(
+    "\n" +
+      c.dim("Add --create-repo <owner/name> to create + push the repo (needs `gh` auth).\n") +
+      c.dim("Add --deploy to also trigger the pipeline (real Azure deploy via OIDC).\n"),
+  );
+  return 0;
+}
+
+/** Render a ShipStep as a copy-pasteable command line. */
+function renderStep(step: ShipStep): string {
+  const quote = (a: string) => (/\s/.test(a) ? `"${a}"` : a);
+  return [step.cmd, ...step.args.map(quote)].join(" ");
+}
+
+/** Write a scaffold file tree under `dir`, creating parent directories. */
+function writeScaffold(dir: string, files: ScaffoldFile[]): void {
+  for (const f of files) {
+    const abs = join(dir, f.path);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, f.content);
+  }
 }
 
 function cmdSchema(values: Values): number {
@@ -582,7 +832,9 @@ function printUsage(): void {
       "  scan <path>    detect the app and print the signals table (stage 0)",
       "  bicep <path>   print just the generated main.bicep",
       "  what-if <path> offline plan diff vs a prior plan (--against) + approval gate",
-      "  up <path>      STUB: print what would deploy (stage 3 — never deploys)",
+      "  up <path>      dry-run stub; add --local-deploy to REALLY deploy via `az` (what-if gated)",
+      "  ship <path>    scaffold a deploy repo (Bicep + CI/CD) and, with --create-repo,",
+      "                 create + push it so its pipeline does the real Azure deploy (OIDC)",
       "  schema         print the open app-intent.schema.json contract",
       "  help           show this help",
       "",
@@ -591,13 +843,26 @@ function printUsage(): void {
       "  --guardrails <file>    apply a guardrails.yaml (policy wins over repo)",
       "  --subscription <file>  budget context (mock subscription.json)",
       "  --against <plan.json>  what-if: baseline plan to diff against (azx plan --json)",
-      "  --yes                  what-if: auto-approve without the interactive prompt",
-      "  --out <file>           write Bicep/schema to a file",
+      "  --yes                  approve: what-if apply / up --local-deploy real deploy",
+      "  --out <file|dir>       write Bicep/schema to a file, or the ship scaffold to a dir",
+      "  --scaffold <dir>       plan: also write the full deploy repo tree (Bicep + CI/CD)",
+      "  --create-repo <o/n>    ship: create + push a real GitHub repo (owner/name)",
+      "  --deploy               ship: trigger the deploy pipeline after push (real deploy)",
+      "  --private/--no-private ship: repo visibility (default: private)",
+      "  --local-deploy         up: really deploy to Azure via `az` (needs `az login`)",
+      "  --resource-group <rg>  up --local-deploy: target resource group (default rg-<app>)",
+      "  --region <r>           up --local-deploy: target region (default: plan region)",
+      "  --pg-password <p>      up --local-deploy: PostgreSQL admin password (if provisioned)",
+      "  --subscription-id <id> up --local-deploy: pin the Azure subscription",
       "  --no-bicep             omit the Bicep block from 'plan' output",
       "  --no-color             disable ANSI color",
       "  --version              print version",
       "",
-      "Everything is an offline dry-run. azx never calls Azure in POC #1.",
+      "Two ways to reach real Azure — both keep plan and apply separate:",
+      "  • `up --local-deploy` — imperative inner loop; `az` deploys, writes .azx/deploy.json.",
+      "  • `ship --create-repo` — codify into a GitHub repo whose OIDC pipeline deploys;",
+      "    it adopts .azx/deploy.json so the first what-if is a clean no-op.",
+      "Everything else (plan/scaffold/what-if/up) is a fully offline dry-run.",
       "",
     ].join("\n"),
   );

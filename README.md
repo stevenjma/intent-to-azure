@@ -108,7 +108,13 @@ escape-hatch declarative file. Uncertain SKUs and regions are never invented.
 [2] plan             resolve capabilities → concrete Azure services / region / SKU.
                      Emit a plain-English summary + main.bicep. ← core deliverable
 
-[3] run + watch      STUB ONLY. Prints "would deploy". Never touches Azure.
+[3] run + watch      STUB ONLY. `azx up` prints "would deploy". Never touches Azure.
+
+[3'] ship            scaffold a deploy repo (Bicep + CI/CD pipeline) and, with
+                     --create-repo, create + push it via `gh`. The committed
+                     GitHub Actions workflow runs the REAL Azure deploy via OIDC
+                     (what-if gate → `az deployment group create`). azx still
+                     makes no Azure calls itself — the pipeline does.
 ```
 
 ---
@@ -231,7 +237,9 @@ COMMANDS
   scan <path>    detect the app and print the signals table (stage 0)
   bicep <path>   print just the generated main.bicep
   what-if <path> offline plan diff vs a prior plan (--against) + approval gate
-  up <path>      STUB: print what would deploy (stage 3 — never deploys)
+  up <path>      STUB: print what would deploy (dry-run — never deploys)
+  ship <path>    scaffold a deploy repo (Bicep + CI/CD) and, with --create-repo,
+                 create + push it so its pipeline runs the REAL Azure deploy (OIDC)
   schema         print the open app-intent.schema.json contract
   help           show this help
 
@@ -239,12 +247,170 @@ FLAGS
   --json                 machine-readable output ({ intent, plan, bicep })
   --guardrails <file>    apply a guardrails.yaml (policy wins over repo)
   --subscription <file>  budget context (mock subscription.json)
-  --out <file>           write Bicep/schema to a file
+  --out <file|dir>       write Bicep/schema to a file, or the ship scaffold to a dir
+  --scaffold <dir>       plan: also write the full deploy repo tree (Bicep + CI/CD)
+  --create-repo <o/n>    ship: create + push a real GitHub repo (owner/name)
+  --deploy               ship: trigger the deploy pipeline after push (real deploy)
+  --private/--no-private ship: repo visibility (default: private)
   --no-bicep             omit the Bicep block from 'plan' output
   --no-color             disable ANSI color
 ```
 
-Everything is an offline dry-run. `azx` never calls Azure in POC #1.
+`plan --scaffold` and `up` are fully offline. `ship --create-repo` is the only path
+that touches the network (git + `gh`); even then, azx never calls Azure — the real
+`az deployment group create` runs inside the pushed GitHub Actions pipeline via OIDC.
+
+---
+
+## Deploy for real: two phases
+
+`azx` reaches real Azure two ways — a fast imperative **inner loop**, then a
+codified **outer loop** — and they compose: both apply the *same* `main.bicep`, so
+promoting from one to the other is provably safe.
+
+### Phase 1 — local deploy (imperative, fast)
+
+`azx up --local-deploy` really creates the resources via the Azure CLI. What-if is
+always previewed first; the apply only happens with `--yes`:
+
+```bash
+az login                                   # once
+azx up /path/to/app --local-deploy         # what-if only (a safe preview)
+azx up /path/to/app --local-deploy --yes   # apply for real
+#   --resource-group <rg>   target RG (default rg-<app>)
+#   --region <r>            target region (default: plan region)
+#   --pg-password <p>       PostgreSQL admin password (if the plan provisions it)
+#   --subscription-id <id>  pin the subscription
+```
+
+On a real apply it writes **`.azx/deploy.json`** — the *continuity ledger* (RG,
+region, deployment name, resource names). `az` group-scoped what-if needs the RG to
+exist, so even a preview ensures an (empty) resource group.
+
+### Phase 2 — codify / harden (declarative, durable)
+
+`azx ship` promotes that deployment into a reviewed GitHub repo + OIDC pipeline. If a
+ledger is present it **adopts** it — pinning the same RG/region so the pipeline's
+first `what-if` is a **clean no-op**, proving the pipeline took ownership of the
+resources local deploy already made, with nothing duplicated.
+
+## Ship it: from plan to a real Azure deploy
+
+`plan --scaffold` and `ship` promote the offline plan into a **real, deployable
+GitHub repo** whose CI/CD pipeline runs the actual Azure deploy. Two modes, one
+engine:
+
+**1. Generate the whole repo, inert (`plan --scaffold <dir>`)** — writes the full
+tree to disk but wires up nothing live:
+
+```bash
+azx plan /path/to/app --scaffold ./out
+# out/
+#   infra/main.bicep                 the generated template
+#   .github/workflows/deploy.yml     the CI/CD pipeline (what-if gate → real deploy)
+#   README.md                        plan summary + setup steps
+#   .azx/plan.json                   the resolved intent + plan
+#   .gitignore
+```
+
+**2. Make it breathe (`ship`)** — turn that scaffold into a live repo:
+
+```bash
+# dry-run: print the scaffold + the exact git/gh commands it WOULD run
+azx ship /path/to/app
+
+# for real: create + push a private GitHub repo (needs `gh auth login`)
+azx ship /path/to/app --create-repo my-org/my-app
+
+# ...and trigger the pipeline so the deploy runs immediately
+azx ship /path/to/app --create-repo my-org/my-app --deploy
+```
+
+**How the real deploy happens.** The pushed `deploy.yml` authenticates to Azure via
+**GitHub OIDC** (no stored secret) and runs two jobs: `what-if` (an
+`az deployment group what-if` safety gate) then `deploy` — gated behind a
+`production` environment you can require reviewers on — which runs the real
+`az deployment group create`. Provision the federated identity + the three repo
+variables once with:
+
+```bash
+scripts/setup-azure-oidc.sh        # or scripts/setup-azure-oidc.ps1 on Windows
+```
+
+> Even in `ship` mode, **azx itself never calls Azure**. It only writes files and
+> (with `--create-repo`) runs `git`/`gh`. The Azure deploy is owned entirely by the
+> pipeline in the repo it creates — plan and apply stay strictly separate.
+
+---
+
+## End-to-end walkthrough (real deploy)
+
+A complete run, from a cold repo to live Azure resources owned by a CI/CD pipeline.
+The two phases are independent — you can stop after Phase 1, or skip straight to
+Phase 2 — but done in order they chain into one story.
+
+**Prerequisites**
+
+- Node **20+**, and the repo built once: `npm install && npm run build`
+  (link it with `npm link` so `azx` is on your PATH, or use `node dist/src/cli.js`).
+- **Azure CLI** logged in: `az login` (Phase 1) and permission to create resources.
+- **GitHub CLI** logged in: `gh auth login` (Phase 2).
+
+**0. Preview offline (no cloud, no credentials)**
+
+```bash
+azx plan /path/to/app                 # signals → intent → Azure plan + Bicep
+azx plan /path/to/app --scaffold ./out   # also writes the full deploy repo tree
+```
+
+**1. Local deploy — get it running now (imperative)**
+
+```bash
+az login
+azx up /path/to/app --local-deploy                 # what-if only: a safe preview
+azx up /path/to/app --local-deploy --yes \
+  --pg-password 'Str0ng!Pass'                       # apply for real (password only if Postgres)
+```
+
+What happens: `az account show` (auth gate) → `az group create` → `az deployment
+group what-if` (gate) → `az deployment group create`. On success it writes
+`/path/to/app/.azx/deploy.json` — the continuity ledger. Your app is now live in
+`rg-<app>`.
+
+**2. Set up OIDC for the pipeline (one time)**
+
+```bash
+cd /path/to/app
+gh auth login
+# From THIS repo's scripts (adjust the path to where you cloned azx):
+/path/to/azx/scripts/setup-azure-oidc.sh           # or .ps1 on Windows
+```
+
+This creates a federated identity and sets the repo **variables**
+`AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` (no secret stored).
+
+**3. Codify / harden — hand the deploy to a reviewed pipeline (declarative)**
+
+```bash
+azx ship /path/to/app --create-repo my-org/my-app          # create + push the repo
+azx ship /path/to/app --create-repo my-org/my-app --deploy # ...and trigger the pipeline
+```
+
+Because `ship` reads `.azx/deploy.json`, the generated repo pins the **same** RG and
+region. In the pushed repo:
+
+- add a repo **secret** `PG_ADMIN_PASSWORD` if your app provisions Postgres, and
+- (recommended) in **Settings → Environments**, add required reviewers to
+  `production` so the real deploy waits on approval.
+
+**4. Verify the clean handoff**
+
+The pipeline's first `what-if` job should report **no changes** — proof it adopted
+the resources Phase 1 created, with nothing duplicated. From then on, every push to
+`main` deploys through review + OIDC; no local credentials, no ad-hoc `az`.
+
+> **Cleanup:** local deploy (and even a what-if preview) creates a resource group.
+> Remove everything with `az group delete -n rg-<app> --yes --no-wait`.
 
 ---
 
@@ -260,6 +426,10 @@ import {
   plan,            // stage [2]   → AzurePlan                    (MCP: plan)
   generateBicep,   // stage [2]   → string (main.bicep)         (MCP: generate_bicep)
   dryRun,          // stage [3]   → RunResult (stub, never deploys)
+  runLocalDeploy,  // stage [3]   → LocalDeployResult (imperative `az` deploy + ledger)
+  buildScaffold,   // stage [3a]  → ScaffoldFile[] (Bicep + CI/CD repo tree)
+  shipSteps,       // stage [3b]  → ShipPlan (the git/gh commands, pure)
+  runShip,         // stage [3b]  → ShipResult (writes + runs — the only side-effect)
   resolveRepo,     // convenience: the whole 0→2 pipeline in one call
 } from "azx";
 
@@ -333,19 +503,21 @@ the one open App Intent contract.
 ## Project layout
 
 ```
-src/            core engine (readRepo, extractIntent, plan, azure-map, bicep, run stub, cli)
+src/            core engine (readRepo, extractIntent, plan, azure-map, bicep, scaffold, ship, cli)
 examples/       3 runnable AI-native fixtures
 test/           golden snapshots + schema-conformance tests
 app-intent.schema.json   the open contract (JSON Schema 2020-12)
 SPEC.md         human-readable contract spec
 ```
 
-## Scope & guardrails (POC #1)
+## Scope & guardrails
 
 - Backend/engine first — **no web UI**.
-- **No real Azure or GitHub API calls.** Generate + preview only.
+- The engine itself makes **no Azure calls** — it generates and previews. The real
+  Azure deploy is delegated to the CI/CD pipeline `ship` scaffolds, run via OIDC in
+  the created GitHub repo. `ship --create-repo` is the only path that touches the
+  network (git + `gh`); everything else runs fully offline with zero cloud credentials.
 - No invented SKUs/regions beyond the MVP mapping; uncertainty becomes a confirmation.
-- Runs entirely offline with zero cloud credentials.
 
 ## License
 
