@@ -68,6 +68,10 @@ test("deploy.yml is valid YAML with what-if gate then real deploy", () => {
   assert.ok(doc.jobs["what-if"], "expected a what-if job");
   assert.ok(doc.jobs.deploy, "expected a deploy job");
   assert.deepEqual(doc.jobs.deploy.needs, "what-if");
+  // Both jobs skip cleanly until OIDC is provisioned (guarded on AZURE_CLIENT_ID),
+  // so the first push doesn't red-X before setup-azure-oidc.sh has run.
+  assert.match(String(doc.jobs["what-if"].if), /AZURE_CLIENT_ID/);
+  assert.match(String(doc.jobs.deploy.if), /AZURE_CLIENT_ID/);
   // The real deploy is gated behind an approvable environment.
   assert.equal(doc.jobs.deploy.environment, "production");
   // The real deploy actually creates resources.
@@ -106,6 +110,11 @@ test("Postgres pipeline passes the secret via a params file, never inline on arg
   // The secret is written to a params file and referenced with @-file...
   assert.ok(wf.includes("--parameters @azx.params.json"), "must reference a params file");
   assert.ok(wf.includes("jq -n --arg p"), "must build the params file from the secret via jq");
+  // ...guarded by a fail-fast check so an unset secret errors before burning an approval...
+  assert.ok(
+    wf.includes('[ -n "$PG_ADMIN_PASSWORD" ]'),
+    "must fail fast when the PG_ADMIN_PASSWORD secret is unset",
+  );
   // ...and NEVER interpolated unquoted onto the az command line.
   assert.ok(
     !wf.includes("postgresAdminPassword=$PG_ADMIN_PASSWORD"),
@@ -138,6 +147,41 @@ test("scaffold ships a repo-parameterized OIDC setup script", () => {
   assert.ok(
     script!.content.includes("could not assign Contributor"),
     "role assignment failure is surfaced, not swallowed",
+  );
+  // Federated-credential creation must also fail loud (not swallow all errors as
+  // "already present") — only a same-name conflict counts as success.
+  assert.ok(
+    script!.content.includes("FederatedIdentityCredentialWithSameNameExists"),
+    "federated-credential errors fail loud except already-exists",
+  );
+  assert.ok(
+    script!.content.includes("could not create federated credential"),
+    "federated-credential failure is surfaced, not swallowed",
+  );
+});
+
+test("scaffold flags a partial-deploy ledger instead of claiming a clean no-op", () => {
+  const { intent, plan, bicep } = build("contoso-marketing");
+  const base = {
+    generatedBy: "azx" as const,
+    deployedAt: "2026-01-01T00:00:00Z",
+    deploymentName: "azx-1",
+    resourceGroup: "rg-contoso-marketing",
+    region: "swedencentral",
+    resources: [],
+  };
+  const readmeFor = (ledger: typeof base & { partial?: boolean }) =>
+    buildScaffold(intent, plan, bicep, { ledger }).find((f) => f.path === "README.md")!.content;
+
+  const clean = readmeFor(base);
+  assert.ok(clean.includes("no infrastructure changes"), "a clean ledger keeps the no-op adoption note");
+
+  const partial = readmeFor({ ...base, partial: true });
+  assert.ok(partial.includes("PARTIAL"), "a partial ledger is flagged as partial");
+  assert.ok(partial.includes("will show creates"), "partial note warns the first what-if shows creates");
+  assert.ok(
+    !partial.includes("no infrastructure changes"),
+    "a partial ledger must not claim a clean no-op",
   );
 });
 

@@ -521,15 +521,35 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
 
   // Verify the adoption is real: if the freshly generated template no longer
   // matches what local deploy applied, the pipeline's first what-if will NOT be a
-  // no-op. Warn loudly rather than let the "clean handoff" claim silently break.
+  // no-op. Compute this as structured data so --json / CI consumers can't miss it,
+  // and warn loudly in human mode rather than let the "clean handoff" claim break.
+  let drift: { expectedHash: string; actualHash: string } | undefined;
   if (ledger?.templateHash) {
     const currentHash = createHash("sha256").update(bicep).digest("hex");
-    if (currentHash !== ledger.templateHash && !values.json) {
+    if (currentHash !== ledger.templateHash) {
+      drift = { expectedHash: ledger.templateHash, actualHash: currentHash };
+    }
+  }
+  const adoption = ledger
+    ? { drift: !!drift, partial: !!ledger.partial, ...(drift ?? {}) }
+    : undefined;
+
+  if (!values.json) {
+    if (drift) {
       process.stdout.write(
         c.yellow(
           "⚠ The generated Bicep differs from the template recorded in .azx/deploy.json —\n" +
             "  the pipeline's first what-if will show changes, not a clean no-op. Re-run\n" +
             "  `azx up --local-deploy` to refresh the ledger, or review the what-if before approving.\n\n",
+        ),
+      );
+    }
+    if (ledger?.partial) {
+      process.stdout.write(
+        c.yellow(
+          "⚠ .azx/deploy.json is from a PARTIAL (failed) local deploy — some resources may be\n" +
+            "  missing, so the pipeline's first what-if will show creates, not a no-op. The\n" +
+            "  generated README flags this; review the first run before approving.\n\n",
         ),
       );
     }
@@ -554,7 +574,7 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
   if (execute) {
     const result = runShip(intent, plan, bicep, shipOpts);
     if (values.json) {
-      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+      process.stdout.write(JSON.stringify({ ...result, adoption }, null, 2) + "\n");
       return 0;
     }
     process.stdout.write(banner(c, `ship ${intent.app.name}  ${c.dim("(live)")}`));
@@ -578,7 +598,7 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
   if (values.out) writeScaffoldFiles(planned.outDir, planned.files);
 
   if (values.json) {
-    process.stdout.write(JSON.stringify({ ...planned, executed: false }, null, 2) + "\n");
+    process.stdout.write(JSON.stringify({ ...planned, executed: false, adoption }, null, 2) + "\n");
     return 0;
   }
 
@@ -892,7 +912,7 @@ function printUsage(): void {
       "Two ways to reach real Azure — both keep plan and apply separate:",
       "  • `up --local-deploy` — imperative inner loop; `az` deploys, writes .azx/deploy.json.",
       "  • `ship --create-repo` — codify into a GitHub repo whose OIDC pipeline deploys;",
-      "    it adopts .azx/deploy.json so the first what-if is a clean no-op.",
+      "    it adopts .azx/deploy.json so the first what-if is typically a no-op (review it).",
       "Everything else (plan/scaffold/what-if/up) is a fully offline dry-run.",
       "",
     ].join("\n"),

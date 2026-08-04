@@ -344,7 +344,7 @@ azx ship /path/to/app --create-repo my-org/my-app --deploy
 variables once with:
 
 ```bash
-scripts/setup-azure-oidc.sh        # or scripts/setup-azure-oidc.ps1 on Windows
+./scripts/setup-azure-oidc.sh      # bash; on Windows use WSL, Git Bash, or Azure Cloud Shell
 ```
 
 > Even in `ship` mode, **azx itself never calls Azure**. It only writes files and

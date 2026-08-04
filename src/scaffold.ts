@@ -101,13 +101,19 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "      - name: Ensure resource group",
     '        run: az group create -n "$RESOURCE_GROUP" -l "$LOCATION" --only-show-errors -o none',
   ];
+  // Skip the whole run until OIDC is provisioned (AZURE_CLIENT_ID variable set by
+  // scripts/setup-azure-oidc.sh). Without this, the first push — which lands before
+  // OIDC can exist — fails `azure/login` and greets the user with a red-X run.
+  const oidcGuard = "    if: ${{ vars.AZURE_CLIENT_ID != '' }}";
   // The @secure() Postgres password is written to a params file via `jq` (keeps it
   // off argv and immune to shell word-splitting), then referenced with @-file.
   const paramsStep = needsPgPassword
     ? [
         "      - name: Write secure parameters file",
         "        run: |",
+        `          [ -n "$PG_ADMIN_PASSWORD" ] || { echo "::error::Set the PG_ADMIN_PASSWORD repository secret before deploying."; exit 1; }`,
         `          jq -n --arg p "$PG_ADMIN_PASSWORD" '{postgresAdminPassword:{value:$p}}' > azx.params.json`,
+        "          chmod 600 azx.params.json",
         "        env:",
         "          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}",
         "",
@@ -144,10 +150,14 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "# AZURE_SUBSCRIPTION_ID (provisioned once by scripts/setup-azure-oidc.sh, shipped",
     "# in this repo). No client secret is stored.",
     "#",
-    "#   what-if  runs `az deployment group what-if` (after ensuring the RG) as a gate.",
+    "#   what-if  runs `az deployment group what-if` (after ensuring the RG) to preview",
+    "#            the change set. `deploy` needs it, so a failed what-if blocks the deploy.",
     "#   deploy   waits on the `production` environment (add required reviewers in",
     "#            repo Settings -> Environments to gate the real deploy on approval),",
     "#            then runs the REAL `az deployment group create`.",
+    "#",
+    "# Both jobs are guarded on the AZURE_CLIENT_ID variable, so runs cleanly SKIP until",
+    "# scripts/setup-azure-oidc.sh has provisioned OIDC — the first push won't red-X.",
     ...pgNote,
     "",
     "name: deploy",
@@ -174,6 +184,7 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "",
     "jobs:",
     "  what-if:",
+    oidcGuard,
     "    runs-on: ubuntu-latest",
     "    steps:",
     "      - uses: actions/checkout@v4",
@@ -188,6 +199,7 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "",
     "  deploy:",
     "    needs: what-if",
+    oidcGuard,
     "    runs-on: ubuntu-latest",
     "    environment: production   # add required reviewers here to gate the real deploy",
     "    steps:",
@@ -230,21 +242,33 @@ function readme(
     : [];
 
   const adoptionNote = ledger
-    ? [
-        "## Adopting an existing local deploy",
-        "",
-        `This repo was codified from an imperative local deploy on **${ledger.deployedAt}**`,
-        `(deployment \`${ledger.deploymentName}\`). It targets the **same** resource group`,
-        `\`${ledger.resourceGroup}\` in \`${ledger.region}\`, so the pipeline's first`,
-        "`what-if` should typically report **no infrastructure changes** — the pipeline is",
-        "taking ownership of the resources you already created rather than duplicating them.",
-        "",
-        "> The no-op holds only if the plan still resolves to the same template and the",
-        "> `PG_ADMIN_PASSWORD` secret (if any) matches the password used in the local",
-        "> deploy. A `@secure()` parameter can still surface as a change in what-if — review",
-        "> the first run before approving the `production` deploy.",
-        "",
-      ]
+    ? ledger.partial
+      ? [
+          "## Adopting a PARTIAL local deploy",
+          "",
+          `> ⚠️ This repo was codified from a local deploy on **${ledger.deployedAt}**`,
+          `> (deployment \`${ledger.deploymentName}\`) that **failed partway**. Some`,
+          `> resources in \`${ledger.resourceGroup}\` (\`${ledger.region}\`) may be missing,`,
+          "> so the pipeline's first `what-if` **will show creates** — that is expected, it",
+          "> finishes what the local deploy started. Review the first run carefully before",
+          "> approving the `production` deploy.",
+          "",
+        ]
+      : [
+          "## Adopting an existing local deploy",
+          "",
+          `This repo was codified from an imperative local deploy on **${ledger.deployedAt}**`,
+          `(deployment \`${ledger.deploymentName}\`). It targets the **same** resource group`,
+          `\`${ledger.resourceGroup}\` in \`${ledger.region}\`, so the pipeline's first`,
+          "`what-if` should typically report **no infrastructure changes** — the pipeline is",
+          "taking ownership of the resources you already created rather than duplicating them.",
+          "",
+          "> The no-op holds only if the plan still resolves to the same template and the",
+          "> `PG_ADMIN_PASSWORD` secret (if any) matches the password used in the local",
+          "> deploy. A `@secure()` parameter can still surface as a change in what-if — review",
+          "> the first run before approving the `production` deploy.",
+          "",
+        ]
     : [];
 
   return [
@@ -273,6 +297,9 @@ function readme(
     "   to gate on approval), then runs the real `az deployment group create`.",
     "",
     "## One-time setup",
+    "",
+    "> Until you finish this setup, `deploy.yml` **skips** every run (it's guarded on",
+    "> `AZURE_CLIENT_ID`), so the initial push won't produce a failed workflow run.",
     "",
     "1. From this repo (after it exists on GitHub and you have `az login` + `gh auth",
     "   login`), provision the federated identity + repo variables:",
@@ -356,10 +383,17 @@ function oidcSetupScript(): string {
     "",
     "# Federated credentials for the two subjects deploy.yml authenticates as.",
     "add_fic () {",
-    '  local name="$1" subject="$2"',
-    '  az ad app federated-credential create --id "$APP_ID" --parameters \\',
-    '    "{\\"name\\":\\"$name\\",\\"issuer\\":\\"$ISSUER\\",\\"subject\\":\\"$subject\\",\\"audiences\\":[\\"$AUD\\"]}" \\',
-    '    >/dev/null 2>&1 && echo "  + fic $name ($subject)" || echo "  = fic $name already present"',
+    '  local name="$1" subject="$2" out',
+    '  if out="$(az ad app federated-credential create --id "$APP_ID" --parameters \\',
+    '    "{\\"name\\":\\"$name\\",\\"issuer\\":\\"$ISSUER\\",\\"subject\\":\\"$subject\\",\\"audiences\\":[\\"$AUD\\"]}" 2>&1)"; then',
+    '    echo "  + fic $name ($subject)"',
+    "  elif grep -qiE 'FederatedIdentityCredentialWithSameNameExists|already exists' <<<\"$out\"; then",
+    '    echo "  = fic $name already present"',
+    "  else",
+    '    echo "ERROR: could not create federated credential $name:" >&2',
+    '    echo "$out" >&2',
+    "    exit 1",
+    "  fi",
     "}",
     'add_fic "gh-main"       "repo:${REPO}:ref:refs/heads/main"',
     'add_fic "gh-production" "repo:${REPO}:environment:production"',
