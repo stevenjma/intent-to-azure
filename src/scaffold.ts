@@ -11,6 +11,7 @@
  */
 
 import type { AppIntent, AzurePlan, DeployLedger } from "./types.js";
+import { planNeedsPgPassword } from "./az-deploy.js";
 
 /** A single file in the generated repo tree (POSIX-style relative path). */
 export interface ScaffoldFile {
@@ -31,8 +32,6 @@ export interface ScaffoldOptions {
    * first `what-if` is a provable no-op over what local deploy already created.
    */
   ledger?: DeployLedger;
-  /** Injectable clock for deterministic output (tests pin this). */
-  now?: () => Date;
 }
 
 /** Lowercase, hyphenated slug safe for resource-group / repo names. */
@@ -61,15 +60,14 @@ export function buildScaffold(
 ): ScaffoldFile[] {
   const region = opts.region ?? opts.ledger?.region ?? plan.region;
   const rg = resourceGroupFor(intent, opts);
-  const needsPgPassword = plan.resources.some(
-    (r) => r.type === "Microsoft.DBforPostgreSQL/flexibleServers",
-  );
+  const needsPgPassword = planNeedsPgPassword(plan);
 
   const files: ScaffoldFile[] = [
     { path: "infra/main.bicep", content: bicep },
     { path: ".github/workflows/deploy.yml", content: deployWorkflow(rg, region, needsPgPassword) },
     { path: "README.md", content: readme(intent, plan, rg, region, needsPgPassword, opts.ledger) },
     { path: ".azx/plan.json", content: JSON.stringify({ intent, plan }, null, 2) + "\n" },
+    { path: "scripts/setup-azure-oidc.sh", content: oidcSetupScript() },
     { path: ".gitignore", content: gitignore() },
   ];
 
@@ -88,7 +86,7 @@ export function buildScaffold(
  *
  * Auth is GitHub OIDC federation: the three repo *variables* (not secrets)
  * AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID are provisioned once
- * by scripts/setup-azure-oidc.(sh|ps1). No client secret is ever stored.
+ * by scripts/setup-azure-oidc.sh (shipped in this repo). No client secret is stored.
  */
 function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): string {
   const loginStep = [
@@ -103,6 +101,18 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "      - name: Ensure resource group",
     '        run: az group create -n "$RESOURCE_GROUP" -l "$LOCATION" --only-show-errors -o none',
   ];
+  // The @secure() Postgres password is written to a params file via `jq` (keeps it
+  // off argv and immune to shell word-splitting), then referenced with @-file.
+  const paramsStep = needsPgPassword
+    ? [
+        "      - name: Write secure parameters file",
+        "        run: |",
+        `          jq -n --arg p "$PG_ADMIN_PASSWORD" '{postgresAdminPassword:{value:$p}}' > azx.params.json`,
+        "        env:",
+        "          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}",
+        "",
+      ]
+    : [];
   // `az deployment` step body, parameterized by the az subcommand + name flag.
   const deployRun = (subcmd: string, nameFlag: string[]): string[] => {
     const runLines = [
@@ -113,9 +123,7 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
       "            --template-file infra/main.bicep" + (needsPgPassword ? " \\" : ""),
     ];
     if (needsPgPassword) {
-      runLines.push("            --parameters postgresAdminPassword=$PG_ADMIN_PASSWORD");
-      runLines.push("        env:");
-      runLines.push("          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}");
+      runLines.push("            --parameters @azx.params.json");
     }
     return runLines;
   };
@@ -133,10 +141,10 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "#",
     "# Real Azure deployment pipeline. Authenticates to Azure via GitHub OIDC",
     "# federation using the repository *variables* AZURE_CLIENT_ID / AZURE_TENANT_ID /",
-    "# AZURE_SUBSCRIPTION_ID (provisioned once by scripts/setup-azure-oidc.(sh|ps1)).",
-    "# No client secret is stored.",
+    "# AZURE_SUBSCRIPTION_ID (provisioned once by scripts/setup-azure-oidc.sh, shipped",
+    "# in this repo). No client secret is stored.",
     "#",
-    "#   what-if  runs `az deployment group what-if` as a safety gate.",
+    "#   what-if  runs `az deployment group what-if` (after ensuring the RG) as a gate.",
     "#   deploy   waits on the `production` environment (add required reviewers in",
     "#            repo Settings -> Environments to gate the real deploy on approval),",
     "#            then runs the REAL `az deployment group create`.",
@@ -174,7 +182,8 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "",
     ...ensureRg,
     "",
-    "      - name: What-if (preview changes, no writes)",
+    ...paramsStep,
+    "      - name: What-if (preview deployment changes)",
     ...deployRun("what-if", []),
     "",
     "  deploy:",
@@ -188,6 +197,7 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "",
     ...ensureRg,
     "",
+    ...paramsStep,
     "      - name: Deploy (real Azure resources)",
     ...deployRun("create", ['--name "azx-${{ github.run_id }}" \\']),
     "",
@@ -226,8 +236,13 @@ function readme(
         `This repo was codified from an imperative local deploy on **${ledger.deployedAt}**`,
         `(deployment \`${ledger.deploymentName}\`). It targets the **same** resource group`,
         `\`${ledger.resourceGroup}\` in \`${ledger.region}\`, so the pipeline's first`,
-        "`what-if` should report **no changes** — proof the pipeline has cleanly taken",
-        "ownership of the resources you already created, with nothing duplicated.",
+        "`what-if` should typically report **no infrastructure changes** — the pipeline is",
+        "taking ownership of the resources you already created rather than duplicating them.",
+        "",
+        "> The no-op holds only if the plan still resolves to the same template and the",
+        "> `PG_ADMIN_PASSWORD` secret (if any) matches the password used in the local",
+        "> deploy. A `@secure()` parameter can still surface as a change in what-if — review",
+        "> the first run before approving the `production` deploy.",
         "",
       ]
     : [];
@@ -259,13 +274,15 @@ function readme(
     "",
     "## One-time setup",
     "",
-    "1. Provision the federated identity + repo variables:",
+    "1. From this repo (after it exists on GitHub and you have `az login` + `gh auth",
+    "   login`), provision the federated identity + repo variables:",
     "",
     "   ```bash",
-    "   scripts/setup-azure-oidc.sh        # or setup-azure-oidc.ps1 on Windows",
+    "   ./scripts/setup-azure-oidc.sh        # bash; on Windows use WSL, Git Bash, or Cloud Shell",
     "   ```",
     "",
-    "   This sets the repo **variables** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,",
+    "   It federates this repo's `main` branch and `production` environment to a new",
+    "   Entra app and sets the repo **variables** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,",
     "   `AZURE_SUBSCRIPTION_ID` (not secrets — deleting the app fully revokes access).",
     "2. (Recommended) In Settings → Environments, add required reviewers to",
     "   `production` so the real deploy waits on a human approval.",
@@ -280,6 +297,88 @@ function readme(
   ].join("\n");
 }
 
+/**
+ * A self-contained, repo-parameterized OIDC bootstrap shipped INTO the generated
+ * repo. Unlike azx's own dev-repo e2e script, this federates the exact two subjects
+ * the generated `deploy.yml` authenticates as — `ref:refs/heads/main` (what-if job)
+ * and `environment:production` (deploy job) — for whichever repo it is run inside.
+ */
+function oidcSetupScript(): string {
+  return [
+    "#!/usr/bin/env bash",
+    "# scripts/setup-azure-oidc.sh — generated by azx `ship`.",
+    "#",
+    "# One-time BYO-Azure setup so this repo's deploy.yml can authenticate to your",
+    "# Azure subscription via GitHub OIDC (no client secret stored). Run it from a",
+    "# clone of THIS repo, after `az login` and `gh auth login`.",
+    "#",
+    "# It creates an Entra app + service principal, federates it to this repo's",
+    "# `main` branch and `production` environment (the two subjects deploy.yml uses),",
+    "# grants Contributor on the subscription, and sets the repo VARIABLES the",
+    "# workflow reads: AZURE_CLIENT_ID  AZURE_TENANT_ID  AZURE_SUBSCRIPTION_ID.",
+    "#",
+    "# Requirements: az CLI (logged in), gh CLI (logged in), permission to create app",
+    "# registrations in your tenant and role assignments on the subscription.",
+    "#",
+    "# Usage: ./scripts/setup-azure-oidc.sh [--subscription <id>] [--name <appName>]",
+    "set -euo pipefail",
+    "",
+    'SUBSCRIPTION=""',
+    'APP_NAME=""',
+    "while [[ $# -gt 0 ]]; do",
+    "  case \"$1\" in",
+    "    --subscription) SUBSCRIPTION=\"$2\"; shift 2 ;;",
+    "    --name) APP_NAME=\"$2\"; shift 2 ;;",
+    "    *) echo \"unknown arg: $1\" >&2; exit 2 ;;",
+    "  esac",
+    "done",
+    "",
+    'REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"',
+    '[[ -n "$APP_NAME" ]] || APP_NAME="oidc-${REPO//\\//-}"',
+    '[[ -n "$SUBSCRIPTION" ]] || SUBSCRIPTION="$(az account show --query id -o tsv)"',
+    'TENANT="$(az account show --query tenantId -o tsv)"',
+    'ISSUER="https://token.actions.githubusercontent.com"',
+    'AUD="api://AzureADTokenExchange"',
+    "",
+    'echo "repo=$REPO  subscription=$SUBSCRIPTION  tenant=$TENANT  app=$APP_NAME"',
+    "",
+    "# App registration + service principal (reuse if present).",
+    "APP_ID=\"$(az ad app list --display-name \"$APP_NAME\" --query '[0].appId' -o tsv)\"",
+    'if [[ -z "$APP_ID" ]]; then',
+    '  APP_ID="$(az ad app create --display-name "$APP_NAME" --query appId -o tsv)"',
+    '  echo "created app $APP_ID"',
+    "else",
+    '  echo "reusing app $APP_ID"',
+    "fi",
+    'az ad sp show --id "$APP_ID" >/dev/null 2>&1 || az ad sp create --id "$APP_ID" >/dev/null',
+    "",
+    "# Federated credentials for the two subjects deploy.yml authenticates as.",
+    "add_fic () {",
+    '  local name="$1" subject="$2"',
+    '  az ad app federated-credential create --id "$APP_ID" --parameters \\',
+    '    "{\\"name\\":\\"$name\\",\\"issuer\\":\\"$ISSUER\\",\\"subject\\":\\"$subject\\",\\"audiences\\":[\\"$AUD\\"]}" \\',
+    '    >/dev/null 2>&1 && echo "  + fic $name ($subject)" || echo "  = fic $name already present"',
+    "}",
+    'add_fic "gh-main"       "repo:${REPO}:ref:refs/heads/main"',
+    'add_fic "gh-production" "repo:${REPO}:environment:production"',
+    "",
+    "# RBAC: Contributor on the subscription (narrow the scope if you prefer).",
+    'az role assignment create --assignee "$APP_ID" --role Contributor \\',
+    '  --scope "/subscriptions/${SUBSCRIPTION}" >/dev/null 2>&1 \\',
+    '  && echo "granted Contributor on /subscriptions/${SUBSCRIPTION}" \\',
+    '  || echo "Contributor role assignment already present (or insufficient perms)"',
+    "",
+    "# Repo variables the workflow reads.",
+    'gh variable set AZURE_CLIENT_ID       -b "$APP_ID"',
+    'gh variable set AZURE_TENANT_ID       -b "$TENANT"',
+    'gh variable set AZURE_SUBSCRIPTION_ID -b "$SUBSCRIPTION"',
+    "",
+    'echo',
+    'echo "Done. Push to main (or run the workflow) to deploy. Revoke with: az ad app delete --id $APP_ID"',
+    "",
+  ].join("\n");
+}
+
 function gitignore(): string {
-  return ["node_modules/", "*.log", ".DS_Store", ""].join("\n");
+  return ["node_modules/", "*.log", ".DS_Store", "azx.params.json", ""].join("\n");
 }

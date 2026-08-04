@@ -98,6 +98,37 @@ test("Postgres plans wire a PG_ADMIN_PASSWORD secret; non-Postgres plans do not"
   parseYaml(noDbWf);
 });
 
+test("Postgres pipeline passes the secret via a params file, never inline on argv", () => {
+  const pg = build("contoso-marketing");
+  const wf = buildScaffold(pg.intent, pg.plan, pg.bicep).find(
+    (f) => f.path === ".github/workflows/deploy.yml",
+  )!.content;
+  // The secret is written to a params file and referenced with @-file...
+  assert.ok(wf.includes("--parameters @azx.params.json"), "must reference a params file");
+  assert.ok(wf.includes("jq -n --arg p"), "must build the params file from the secret via jq");
+  // ...and NEVER interpolated unquoted onto the az command line.
+  assert.ok(
+    !wf.includes("postgresAdminPassword=$PG_ADMIN_PASSWORD"),
+    "must not put the secret on argv (word-splitting / injection risk)",
+  );
+  parseYaml(wf);
+});
+
+test("scaffold ships a repo-parameterized OIDC setup script", () => {
+  const { intent, plan, bicep } = build("django-notes");
+  const files = buildScaffold(intent, plan, bicep);
+  const script = files.find((f) => f.path === "scripts/setup-azure-oidc.sh");
+  assert.ok(script, "expected scripts/setup-azure-oidc.sh to be shipped");
+  // It must federate the exact two subjects deploy.yml authenticates as.
+  assert.ok(script!.content.includes("repo:${REPO}:ref:refs/heads/main"), "federates main branch");
+  assert.ok(
+    script!.content.includes("repo:${REPO}:environment:production"),
+    "federates the production environment",
+  );
+  // And resolve the repo it runs inside (not hardcoded to azx's own repo).
+  assert.ok(script!.content.includes("gh repo view --json nameWithOwner"), "resolves the current repo");
+});
+
 test("shipSteps: no repo → git-only; --create-repo adds gh create; --deploy adds trigger", () => {
   const { intent, plan, bicep } = build("django-notes");
 

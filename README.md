@@ -108,7 +108,8 @@ escape-hatch declarative file. Uncertain SKUs and regions are never invented.
 [2] plan             resolve capabilities → concrete Azure services / region / SKU.
                      Emit a plain-English summary + main.bicep. ← core deliverable
 
-[3] run + watch      STUB ONLY. `azx up` prints "would deploy". Never touches Azure.
+[3] run + watch      `azx up` prints "would deploy" (dry-run stub). Add
+                     --local-deploy to REALLY deploy via `az` (what-if gated).
 
 [3'] ship            scaffold a deploy repo (Bicep + CI/CD pipeline) and, with
                      --create-repo, create + push it via `gh`. The committed
@@ -237,7 +238,7 @@ COMMANDS
   scan <path>    detect the app and print the signals table (stage 0)
   bicep <path>   print just the generated main.bicep
   what-if <path> offline plan diff vs a prior plan (--against) + approval gate
-  up <path>      STUB: print what would deploy (dry-run — never deploys)
+  up <path>      dry-run stub by default; add --local-deploy to REALLY deploy via `az`
   ship <path>    scaffold a deploy repo (Bicep + CI/CD) and, with --create-repo,
                  create + push it so its pipeline runs the REAL Azure deploy (OIDC)
   schema         print the open app-intent.schema.json contract
@@ -252,13 +253,20 @@ FLAGS
   --create-repo <o/n>    ship: create + push a real GitHub repo (owner/name)
   --deploy               ship: trigger the deploy pipeline after push (real deploy)
   --private/--no-private ship: repo visibility (default: private)
+  --local-deploy         up: REALLY deploy to Azure via `az` (needs `az login`)
+  --yes                  up --local-deploy: apply for real (else what-if only)
+  --resource-group <rg>  up --local-deploy: target RG (default rg-<app>)
+  --region <r>           up --local-deploy: target region (default: plan region)
+  --pg-password <p>      up --local-deploy: PostgreSQL admin password (if provisioned)
+  --subscription-id <id> up --local-deploy: pin the Azure subscription
   --no-bicep             omit the Bicep block from 'plan' output
   --no-color             disable ANSI color
 ```
 
-`plan --scaffold` and `up` are fully offline. `ship --create-repo` is the only path
-that touches the network (git + `gh`); even then, azx never calls Azure — the real
-`az deployment group create` runs inside the pushed GitHub Actions pipeline via OIDC.
+`plan --scaffold` and plain `up` are fully offline. `up --local-deploy` and
+`ship --create-repo` are the only paths that leave the machine: `up --local-deploy`
+calls `az` directly, while `ship` only runs git + `gh` (the real `az deployment group
+create` runs inside the pushed GitHub Actions pipeline via OIDC — azx never calls it).
 
 ---
 
@@ -291,8 +299,10 @@ exist, so even a preview ensures an (empty) resource group.
 
 `azx ship` promotes that deployment into a reviewed GitHub repo + OIDC pipeline. If a
 ledger is present it **adopts** it — pinning the same RG/region so the pipeline's
-first `what-if` is a **clean no-op**, proving the pipeline took ownership of the
-resources local deploy already made, with nothing duplicated.
+first `what-if` typically reports **no changes**, taking ownership of the resources
+local deploy already made rather than duplicating them. The ledger records the
+deployed template's hash, so `ship` warns if the plan has drifted since (in which case
+the first what-if won't be a no-op — review it before approving).
 
 ## Ship it: from plan to a real Azure deploy
 
@@ -377,36 +387,43 @@ group what-if` (gate) → `az deployment group create`. On success it writes
 `/path/to/app/.azx/deploy.json` — the continuity ledger. Your app is now live in
 `rg-<app>`.
 
-**2. Set up OIDC for the pipeline (one time)**
+**2. Codify / harden — hand the deploy to a reviewed pipeline (declarative)**
 
 ```bash
-cd /path/to/app
-gh auth login
-# From THIS repo's scripts (adjust the path to where you cloned azx):
-/path/to/azx/scripts/setup-azure-oidc.sh           # or .ps1 on Windows
-```
-
-This creates a federated identity and sets the repo **variables**
-`AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` (no secret stored).
-
-**3. Codify / harden — hand the deploy to a reviewed pipeline (declarative)**
-
-```bash
-azx ship /path/to/app --create-repo my-org/my-app          # create + push the repo
-azx ship /path/to/app --create-repo my-org/my-app --deploy # ...and trigger the pipeline
+azx ship /path/to/app --create-repo my-org/my-app   # create + push the deploy repo
 ```
 
 Because `ship` reads `.azx/deploy.json`, the generated repo pins the **same** RG and
-region. In the pushed repo:
+region and records the deployed template's hash (it warns if the plan has drifted).
+The scaffold it pushes includes `scripts/setup-azure-oidc.sh` — the OIDC bootstrap
+for *this* repo.
 
-- add a repo **secret** `PG_ADMIN_PASSWORD` if your app provisions Postgres, and
+**3. Wire up OIDC + secrets in the generated repo (one time)**
+
+```bash
+git clone https://github.com/my-org/my-app && cd my-app
+gh auth login
+./scripts/setup-azure-oidc.sh    # federates THIS repo's main + production; sets AZURE_* vars
+```
+
+This federates the two subjects the pipeline authenticates as
+(`ref:refs/heads/main` and `environment:production`) and sets the repo **variables**
+`AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` (no secret stored).
+Then, in the generated repo:
+
+- add a repo **secret** `PG_ADMIN_PASSWORD` if your app provisions Postgres (it must
+  match the `--pg-password` you used in Phase 1, or the first what-if won't be a no-op), and
 - (recommended) in **Settings → Environments**, add required reviewers to
   `production` so the real deploy waits on approval.
 
-**4. Verify the clean handoff**
+**4. Deploy through the pipeline & verify the clean handoff**
 
-The pipeline's first `what-if` job should report **no changes** — proof it adopted
-the resources Phase 1 created, with nothing duplicated. From then on, every push to
+```bash
+gh workflow run deploy.yml --repo my-org/my-app   # or just push to main
+```
+
+The pipeline's first `what-if` job should report **no changes** — it adopted the
+resources Phase 1 created rather than duplicating them. From then on, every push to
 `main` deploys through review + OIDC; no local credentials, no ad-hoc `az`.
 
 > **Cleanup:** local deploy (and even a what-if preview) creates a resource group.

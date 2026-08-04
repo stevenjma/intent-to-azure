@@ -18,6 +18,9 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { writeFileSync, rmSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
 
 import type { AzurePlan, DeployLedger } from "./types.js";
 
@@ -26,6 +29,20 @@ export interface AzResult {
   status: number;
   stdout: string;
   stderr: string;
+}
+
+/**
+ * Thrown when a deploy fails. When the failure happened *after* resources may
+ * have been created, {@link DeployError.ledger} carries a `partial` ledger so the
+ * caller can persist it and the orphaned resource group can be reconciled.
+ */
+export class DeployError extends Error {
+  readonly ledger?: DeployLedger;
+  constructor(message: string, ledger?: DeployLedger) {
+    super(message);
+    this.name = "DeployError";
+    this.ledger = ledger;
+  }
 }
 
 /** Injectable `az` executor so this module is testable without a real cloud. */
@@ -87,13 +104,25 @@ export function defaultAzRunner(): AzRunner {
   };
 }
 
-/** Parameter args shared by what-if and create when the plan needs a PG password. */
-function paramArgs(opts: LocalDeployOptions, needsPg: boolean): string[] {
+/**
+ * Parameter args shared by what-if and create. The Postgres admin password is a
+ * `@secure()` param and is NEVER placed on the command line (argv is world-readable
+ * via `ps`/`/proc/<pid>/cmdline`). Instead the caller writes it to a 0600 params
+ * file and we reference it with `--parameters @<file>`.
+ */
+function paramArgs(opts: LocalDeployOptions, paramsFile?: string): string[] {
   const args = ["--template-file", opts.bicepPath];
-  if (needsPg && opts.pgPassword) {
-    args.push("--parameters", `postgresAdminPassword=${opts.pgPassword}`);
-  }
+  if (paramsFile) args.push("--parameters", `@${paramsFile}`);
   return args;
+}
+
+/** SHA-256 of the bicep being deployed, best-effort (undefined if unreadable). */
+function templateHash(bicepPath: string): string | undefined {
+  try {
+    return createHash("sha256").update(readFileSync(bicepPath)).digest("hex");
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -116,83 +145,112 @@ export function runLocalDeploy(
     );
   }
 
-  // 1. Must be logged in.
-  const account = runner(["account", "show", "-o", "json"]);
-  if (account.status !== 0) {
-    throw new Error("not logged in to Azure. Run `az login` first.");
+  // The Postgres admin password never goes on argv. Write it to a locked-down
+  // (0600) params file next to the bicep and reference it with `--parameters @`.
+  // Cleaned up in the `finally` below so the secret never lingers on disk.
+  let paramsFile: string | undefined;
+  if (needsPg && opts.pgPassword) {
+    paramsFile = join(dirname(opts.bicepPath), "azx.params.json");
+    writeFileSync(
+      paramsFile,
+      JSON.stringify({ postgresAdminPassword: { value: opts.pgPassword } }) + "\n",
+      { mode: 0o600 },
+    );
   }
-  let subscriptionId: string | undefined = opts.subscriptionId;
+
   try {
-    const parsed = JSON.parse(account.stdout) as { id?: string };
-    subscriptionId = subscriptionId ?? parsed.id;
-  } catch {
-    /* leave subscriptionId as provided */
+    // 1. Must be logged in.
+    const account = runner(["account", "show", "-o", "json"]);
+    if (account.status !== 0) {
+      throw new Error("not logged in to Azure. Run `az login` first.");
+    }
+    let subscriptionId: string | undefined = opts.subscriptionId;
+    try {
+      const parsed = JSON.parse(account.stdout) as { id?: string };
+      subscriptionId = subscriptionId ?? parsed.id;
+    } catch {
+      /* leave subscriptionId as provided */
+    }
+    steps.push(`authenticated to Azure${subscriptionId ? ` (subscription ${subscriptionId})` : ""}`);
+
+    // 2. Pin subscription if asked.
+    if (opts.subscriptionId) {
+      const set = runner(["account", "set", "--subscription", opts.subscriptionId]);
+      if (set.status !== 0) throw new Error(`az account set failed: ${set.stderr.trim()}`);
+      steps.push(`selected subscription ${opts.subscriptionId}`);
+    }
+
+    // 3. Ensure the resource group.
+    const rg = runner(["group", "create", "-n", opts.resourceGroup, "-l", opts.region, "-o", "none"]);
+    if (rg.status !== 0) throw new Error(`az group create failed: ${rg.stderr.trim()}`);
+    steps.push(`ensured resource group ${opts.resourceGroup} in ${opts.region}`);
+
+    // 4. What-if gate — always previewed, never optional.
+    const params = paramArgs(opts, paramsFile);
+    const whatIf = runner([
+      "deployment",
+      "group",
+      "what-if",
+      "-g",
+      opts.resourceGroup,
+      ...params,
+      "--no-pretty-print",
+    ]);
+    if (whatIf.status !== 0) {
+      throw new Error(`what-if failed (refusing to deploy): ${whatIf.stderr.trim() || whatIf.stdout.trim()}`);
+    }
+    steps.push("what-if preview succeeded");
+
+    // 5. Stop here unless applying.
+    if (!opts.apply) {
+      steps.push("stopped after what-if (pass --yes to apply)");
+      return { applied: false, blocked: false, steps, whatIf: whatIf.stdout };
+    }
+
+    // 6. Real deploy.
+    const now = (opts.now ?? (() => new Date()))();
+    const deploymentName = `azx-${now.toISOString().replace(/[:.]/g, "-")}`;
+    const ledgerBase: DeployLedger = {
+      generatedBy: "azx",
+      deployedAt: now.toISOString(),
+      subscriptionId,
+      resourceGroup: opts.resourceGroup,
+      region: opts.region,
+      deploymentName,
+      templateHash: templateHash(opts.bicepPath),
+      resources: plan.resources.map((r) => ({ id: r.id, name: r.name, type: r.type })),
+    };
+
+    const create = runner([
+      "deployment",
+      "group",
+      "create",
+      "-g",
+      opts.resourceGroup,
+      "--name",
+      deploymentName,
+      ...params,
+      "-o",
+      "none",
+    ]);
+    if (create.status !== 0) {
+      // ARM deployments are not atomic: some resources may already be live. Emit a
+      // `partial` ledger so the orphaned RG can be reconciled or torn down.
+      throw new DeployError(
+        `deployment failed: ${create.stderr.trim() || create.stdout.trim()}`,
+        { ...ledgerBase, partial: true },
+      );
+    }
+    steps.push(`deployed ${plan.resources.length} resource(s) as ${deploymentName}`);
+
+    return { applied: true, blocked: false, steps, whatIf: whatIf.stdout, ledger: ledgerBase };
+  } finally {
+    if (paramsFile) {
+      try {
+        rmSync(paramsFile, { force: true });
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
   }
-  steps.push(`authenticated to Azure${subscriptionId ? ` (subscription ${subscriptionId})` : ""}`);
-
-  // 2. Pin subscription if asked.
-  if (opts.subscriptionId) {
-    const set = runner(["account", "set", "--subscription", opts.subscriptionId]);
-    if (set.status !== 0) throw new Error(`az account set failed: ${set.stderr.trim()}`);
-    steps.push(`selected subscription ${opts.subscriptionId}`);
-  }
-
-  // 3. Ensure the resource group.
-  const rg = runner(["group", "create", "-n", opts.resourceGroup, "-l", opts.region, "-o", "none"]);
-  if (rg.status !== 0) throw new Error(`az group create failed: ${rg.stderr.trim()}`);
-  steps.push(`ensured resource group ${opts.resourceGroup} in ${opts.region}`);
-
-  // 4. What-if gate — always previewed, never optional.
-  const params = paramArgs(opts, needsPg);
-  const whatIf = runner([
-    "deployment",
-    "group",
-    "what-if",
-    "-g",
-    opts.resourceGroup,
-    ...params,
-    "--no-pretty-print",
-  ]);
-  if (whatIf.status !== 0) {
-    throw new Error(`what-if failed (refusing to deploy): ${whatIf.stderr.trim() || whatIf.stdout.trim()}`);
-  }
-  steps.push("what-if preview succeeded");
-
-  // 5. Stop here unless applying.
-  if (!opts.apply) {
-    steps.push("stopped after what-if (pass --yes to apply)");
-    return { applied: false, blocked: false, steps, whatIf: whatIf.stdout };
-  }
-
-  // 6. Real deploy.
-  const now = (opts.now ?? (() => new Date()))();
-  const deploymentName = `azx-${now.toISOString().replace(/[:.]/g, "-")}`;
-  const create = runner([
-    "deployment",
-    "group",
-    "create",
-    "-g",
-    opts.resourceGroup,
-    "--name",
-    deploymentName,
-    ...params,
-    "-o",
-    "none",
-  ]);
-  if (create.status !== 0) {
-    throw new Error(`deployment failed: ${create.stderr.trim() || create.stdout.trim()}`);
-  }
-  steps.push(`deployed ${plan.resources.length} resource(s) as ${deploymentName}`);
-
-  const ledger: DeployLedger = {
-    generatedBy: "azx",
-    deployedAt: now.toISOString(),
-    subscriptionId,
-    resourceGroup: opts.resourceGroup,
-    region: opts.region,
-    deploymentName,
-    resources: plan.resources.map((r) => ({ id: r.id, name: r.name, type: r.type })),
-  };
-
-  return { applied: true, blocked: false, steps, whatIf: whatIf.stdout, ledger };
 }

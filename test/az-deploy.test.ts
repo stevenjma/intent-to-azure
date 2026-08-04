@@ -10,9 +10,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import { resolveRepo } from "../src/index.js";
-import { runLocalDeploy, planNeedsPgPassword, type AzRunner } from "../src/az-deploy.js";
+import { runLocalDeploy, planNeedsPgPassword, DeployError, type AzRunner } from "../src/az-deploy.js";
 import { buildScaffold } from "../src/scaffold.js";
 
 const FIXED = new Date("2024-01-01T00:00:00.000Z");
@@ -41,8 +44,14 @@ function fakeAz(overrides: Record<string, { status: number; stdout?: string; std
   return { runner, calls };
 }
 
+// A real bicep file on disk so the template hash + secure params file behave as in
+// production (the caller writes main.bicep to a temp dir before deploying).
+const bicepDir = mkdtempSync(join(tmpdir(), "azx-azd-test-"));
+const bicepPath = join(bicepDir, "main.bicep");
+writeFileSync(bicepPath, "// test bicep\n");
+
 const pgOpts = {
-  bicepPath: "/tmp/main.bicep",
+  bicepPath,
   resourceGroup: "rg-django-notes",
   region: "eastus2",
   pgPassword: "P@ssw0rd!",
@@ -109,9 +118,43 @@ test("apply runs the real create and returns a continuity ledger", () => {
   assert.equal(led.subscriptionId, "sub-abc");
   assert.equal(led.deploymentName, "azx-2024-01-01T00-00-00-000Z");
   assert.equal(led.resources.length, plan.resources.length);
-  // The secret is passed as a parameter to both what-if and create.
-  const createCall = calls.find((c) => c[2] === "create")!;
-  assert.ok(createCall.includes("postgresAdminPassword=P@ssw0rd!"));
+  // The template hash is recorded so `ship` can verify a clean adoption.
+  assert.match(led.templateHash!, /^[0-9a-f]{64}$/);
+  assert.notEqual(led.partial, true);
+});
+
+test("the Postgres password never appears on argv — a @secure params file is used", () => {
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz();
+  runLocalDeploy(plan, { ...pgOpts, apply: true, now: () => FIXED }, runner);
+
+  // Both what-if and create reference a params FILE, never the raw secret inline.
+  for (const sub of ["what-if", "create"]) {
+    const call = calls.find((c) => c[2] === sub)!;
+    assert.ok(
+      call.some((a) => a.startsWith("@")),
+      `${sub} must pass --parameters @file`,
+    );
+  }
+  assert.ok(
+    !calls.some((c) => c.some((a) => a.includes("P@ssw0rd!"))),
+    "the raw password must never appear in any az argument",
+  );
+});
+
+test("a failed create emits a partial ledger for reconciliation", () => {
+  const { plan } = build("django-notes");
+  const { runner } = fakeAz({
+    "deployment group create": { status: 1, stderr: "quota exceeded" },
+  });
+  try {
+    runLocalDeploy(plan, { ...pgOpts, apply: true, now: () => FIXED }, runner);
+    assert.fail("expected a DeployError");
+  } catch (err) {
+    assert.ok(err instanceof DeployError);
+    assert.equal(err.ledger?.partial, true);
+    assert.equal(err.ledger?.resourceGroup, "rg-django-notes");
+  }
 });
 
 test("ship adopts the ledger: pipeline targets the same resource group", () => {

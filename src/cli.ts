@@ -18,8 +18,9 @@
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync, readSync, mkdirSync, mkdtempSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { basename, resolve, join, dirname } from "node:path";
+import { basename, resolve, join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 
 import { readRepo, type RepoScan } from "./read-repo.js";
 import { extractIntent } from "./extract-intent.js";
@@ -30,8 +31,8 @@ import { generateBicep } from "./bicep.js";
 import { dryRun } from "./run.js";
 import { diffPlans } from "./diff.js";
 import { buildScaffold, resourceGroupFor, type ScaffoldFile } from "./scaffold.js";
-import { shipSteps, runShip, type ShipStep } from "./ship.js";
-import { runLocalDeploy } from "./az-deploy.js";
+import { shipSteps, runShip, writeScaffoldFiles, type ShipStep } from "./ship.js";
+import { runLocalDeploy, DeployError } from "./az-deploy.js";
 import type { AppIntent, AzurePlan, ChangeAction, Confirmation, Guardrails, BudgetContext, Confidence, PlanDiff, DeployLedger } from "./types.js";
 
 interface Values {
@@ -190,7 +191,7 @@ function cmdPlan(repoArg: string, values: Values, c: Color): number {
   let scaffoldFiles: ScaffoldFile[] | undefined;
   if (values.scaffold) {
     scaffoldFiles = buildScaffold(intent, plan, bicep, { ledger: loadLedger(root) });
-    writeScaffold(resolve(values.scaffold), scaffoldFiles);
+    writeScaffoldFiles(resolve(values.scaffold), scaffoldFiles);
   }
 
   if (values.json) {
@@ -401,8 +402,9 @@ function cmdLocalDeploy(
     return 1;
   }
 
-  const rg = values["resource-group"] ?? resourceGroupFor(intent);
-  const region = values.region ?? plan.region;
+  const ledger = loadLedger(root);
+  const rg = values["resource-group"] ?? resourceGroupFor(intent, { ledger });
+  const region = values.region ?? ledger?.region ?? plan.region;
   const apply = !!values.yes;
 
   // The `az deployment` calls need main.bicep on disk. Write it to a throwaway
@@ -421,11 +423,26 @@ function cmdLocalDeploy(
       apply,
     });
   } catch (err) {
+    // A partial failure still created a real (billable) resource group — persist
+    // its ledger so `ship` and the user can reconcile or tear it down.
+    let partialPath: string | undefined;
+    if (err instanceof DeployError && err.ledger) {
+      partialPath = persistLedger(root, err.ledger);
+    }
     if (values.json) {
-      process.stdout.write(JSON.stringify({ error: (err as Error).message }, null, 2) + "\n");
+      process.stdout.write(
+        JSON.stringify({ error: (err as Error).message, ledgerPath: partialPath }, null, 2) + "\n",
+      );
     } else {
       process.stdout.write(banner(c, `deploy ${intent.app.name}`));
       process.stdout.write("\n" + c.red("✗ " + (err as Error).message) + "\n");
+      if (partialPath) {
+        process.stdout.write(
+          c.yellow(
+            `  ⚠ Partial deploy — resource group ${rg} may hold live resources. Ledger: ${partialPath}\n`,
+          ) + c.dim(`  Tear it down with: az group delete -n ${rg} --yes --no-wait\n`),
+        );
+      }
     }
     return 1;
   }
@@ -433,10 +450,7 @@ function cmdLocalDeploy(
   // Persist the ledger on a real apply so `ship` can adopt this deployment.
   let ledgerPath: string | undefined;
   if (result.ledger) {
-    const azxDir = join(root, ".azx");
-    mkdirSync(azxDir, { recursive: true });
-    ledgerPath = join(azxDir, "deploy.json");
-    writeFileSync(ledgerPath, JSON.stringify(result.ledger, null, 2) + "\n");
+    ledgerPath = persistLedger(root, result.ledger);
   }
 
   if (values.json) {
@@ -472,6 +486,15 @@ function loadLedger(root: string): DeployLedger | undefined {
   }
 }
 
+/** Write a ledger to `<root>/.azx/deploy.json`, returning the path written. */
+function persistLedger(root: string, ledger: DeployLedger): string {
+  const azxDir = join(root, ".azx");
+  mkdirSync(azxDir, { recursive: true });
+  const p = join(azxDir, "deploy.json");
+  writeFileSync(p, JSON.stringify(ledger, null, 2) + "\n");
+  return p;
+}
+
 /**
  * `azx ship <path> [--create-repo owner/name] [--deploy] [--private] [--out dir]`
  *
@@ -487,13 +510,30 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
   const root = resolve(repoArg);
   const { intent, plan, bicep } = buildAll(root, values);
 
+  const ledger = loadLedger(root);
   const shipOpts = {
     repo: values["create-repo"],
     visibility: (values.private === false ? "public" : "private") as "public" | "private",
     deploy: values.deploy,
     outDir: values.out,
-    ledger: loadLedger(root),
+    ledger,
   };
+
+  // Verify the adoption is real: if the freshly generated template no longer
+  // matches what local deploy applied, the pipeline's first what-if will NOT be a
+  // no-op. Warn loudly rather than let the "clean handoff" claim silently break.
+  if (ledger?.templateHash) {
+    const currentHash = createHash("sha256").update(bicep).digest("hex");
+    if (currentHash !== ledger.templateHash && !values.json) {
+      process.stdout.write(
+        c.yellow(
+          "⚠ The generated Bicep differs from the template recorded in .azx/deploy.json —\n" +
+            "  the pipeline's first what-if will show changes, not a clean no-op. Re-run\n" +
+            "  `azx up --local-deploy` to refresh the ledger, or review the what-if before approving.\n\n",
+        ),
+      );
+    }
+  }
 
   // Budget block is a hard stop: never ship a plan a guardrail refused.
   if (plan.budget.blocked) {
@@ -535,7 +575,7 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
 
   // Dry run: plan the steps, write scaffold if --out given, print what would run.
   const planned = shipSteps(intent, plan, bicep, shipOpts);
-  if (values.out) writeScaffold(planned.outDir, planned.files);
+  if (values.out) writeScaffoldFiles(planned.outDir, planned.files);
 
   if (values.json) {
     process.stdout.write(JSON.stringify({ ...planned, executed: false }, null, 2) + "\n");
@@ -564,15 +604,6 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
 function renderStep(step: ShipStep): string {
   const quote = (a: string) => (/\s/.test(a) ? `"${a}"` : a);
   return [step.cmd, ...step.args.map(quote)].join(" ");
-}
-
-/** Write a scaffold file tree under `dir`, creating parent directories. */
-function writeScaffold(dir: string, files: ScaffoldFile[]): void {
-  for (const f of files) {
-    const abs = join(dir, f.path);
-    mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, f.content);
-  }
 }
 
 function cmdSchema(values: Values): number {

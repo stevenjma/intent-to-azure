@@ -406,6 +406,17 @@ export interface DeployLedger {
   region: string;
   /** The ARM deployment name used (`azx-<timestamp>`). */
   deploymentName: string;
+  /**
+   * SHA-256 of the exact `main.bicep` that was deployed. `azx ship` compares this
+   * against the template it regenerates and warns if they diverge, so the "first
+   * what-if is a no-op" adoption is verified rather than merely assumed.
+   */
+  templateHash?: string;
+  /**
+   * True when the apply failed partway (ARM deployments are not atomic). The ledger
+   * is still written so the orphaned resource group can be reconciled or torn down.
+   */
+  partial?: boolean;
   /** The resources the plan created, for adoption + auditing. */
   resources: LedgerResource[];
 }

@@ -59,6 +59,19 @@ export interface ShipResult extends ShipPlan {
 /** Pluggable command executor so `runShip` is testable without real git/gh. */
 export type CommandRunner = (step: ShipStep, cwd: string) => void;
 
+/**
+ * Write a scaffold file tree under `dir`, creating parent directories. Shell
+ * scripts (`*.sh`) are written executable so the shipped OIDC setup script can be
+ * run directly. Shared by {@link runShip} and the CLI's dry-run `--out` writer.
+ */
+export function writeScaffoldFiles(dir: string, files: ScaffoldFile[]): void {
+  for (const file of files) {
+    const abs = join(dir, file.path);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, file.content, file.path.endsWith(".sh") ? { mode: 0o755 } : undefined);
+  }
+}
+
 /** Local directory the scaffold is written to for a given repo/options. */
 export function shipOutDir(intent: AppIntent, opts: ShipOptions = {}): string {
   if (opts.outDir) return resolve(opts.outDir);
@@ -145,11 +158,7 @@ export function runShip(
 ): ShipResult {
   const planned = shipSteps(intent, plan, bicep, opts);
 
-  for (const file of planned.files) {
-    const abs = join(planned.outDir, file.path);
-    mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, file.content);
-  }
+  writeScaffoldFiles(planned.outDir, planned.files);
 
   for (const step of planned.steps) {
     runner(step, planned.outDir);
