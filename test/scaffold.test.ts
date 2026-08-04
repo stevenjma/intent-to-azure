@@ -127,6 +127,18 @@ test("scaffold ships a repo-parameterized OIDC setup script", () => {
   );
   // And resolve the repo it runs inside (not hardcoded to azx's own repo).
   assert.ok(script!.content.includes("gh repo view --json nameWithOwner"), "resolves the current repo");
+  // RBAC must be race-hardened: assign by SP object id (skips the Graph lookup that
+  // races a fresh SP), retry through Entra replication, and fail loud (never swallow).
+  assert.ok(
+    script!.content.includes("--assignee-object-id") &&
+      script!.content.includes("--assignee-principal-type ServicePrincipal"),
+    "role assignment uses SP object id + principal type",
+  );
+  assert.ok(/sleep \d+/.test(script!.content), "role assignment retries with a backoff sleep");
+  assert.ok(
+    script!.content.includes("could not assign Contributor"),
+    "role assignment failure is surfaced, not swallowed",
+  );
 });
 
 test("shipSteps: no repo → git-only; --create-repo adds gh create; --deploy adds trigger", () => {
