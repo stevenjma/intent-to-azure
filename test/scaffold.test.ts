@@ -19,7 +19,7 @@ import { parse as parseYaml } from "yaml";
 
 import { resolveRepo } from "../src/index.js";
 import { buildScaffold } from "../src/scaffold.js";
-import { shipSteps, runShip, assertEmptyOutDir, type ShipStep } from "../src/ship.js";
+import { shipSteps, runShip, shipOutDir, assertEmptyOutDir, type ShipStep } from "../src/ship.js";
 import { fileURLToPath } from "node:url";
 
 const FIXED = new Date("2024-01-01T00:00:00.000Z");
@@ -358,4 +358,45 @@ test("runShip writes the scaffold to disk and runs each step in that dir", () =>
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("buildScaffold refuses a hostile ledger at the sink (defence in depth)", () => {
+  // buildScaffold is a public library entry that bakes ledger fields into generated
+  // bash/YAML/Markdown. Even if a caller skipped loadLedger's strict read, the sink
+  // must re-assert rather than interpolate an injection payload.
+  const { intent, plan, bicep } = build("contoso-marketing");
+  const good = {
+    generatedBy: "azx" as const,
+    deployedAt: "2026-01-01T00:00:00Z",
+    subscriptionId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+    resourceGroup: "rg-contoso-marketing",
+    region: "swedencentral",
+    deploymentName: "azx-1",
+    resources: [],
+  };
+  assert.doesNotThrow(() => buildScaffold(intent, plan, bicep, { ledger: good }));
+  for (const bad of [
+    { ...good, region: "eastus\nrm -rf /" },
+    { ...good, resourceGroup: "$(id)" },
+    { ...good, subscriptionId: "My Subscription" },
+    { ...good, deployedAt: "2026 <img src=x>" },
+  ]) {
+    assert.throws(
+      () => buildScaffold(intent, plan, bicep, { ledger: bad as typeof good }),
+      /ledger/i,
+      `expected rejection of ${JSON.stringify(bad)}`,
+    );
+  }
+});
+
+test("shipOutDir slugifies an untrusted app name so it can't escape the cwd", () => {
+  const { intent } = build("django-notes");
+  // A hostile package.json name must not steer the write (and `git init`) outside cwd.
+  const evil = { ...intent, app: { ...intent.app, name: "../../../etc/pwned" } };
+  const out = shipOutDir(evil);
+  assert.ok(!out.includes(".."), "no parent-dir traversal survives slugification");
+  assert.ok(/[/\\]azx-deploy-[a-z0-9-]+$/.test(out), `basename is a safe slug: ${out}`);
+  // A repo flag is slugified the same way.
+  const fromRepo = shipOutDir(intent, { repo: "acme/My Repo!" });
+  assert.ok(/[/\\]azx-deploy-my-repo$/.test(fromRepo), `repo basename slugged: ${fromRepo}`);
 });

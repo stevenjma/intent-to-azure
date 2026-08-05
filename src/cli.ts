@@ -28,7 +28,7 @@ import { loadGuardrails, parseGuardrails } from "./guardrails.js";
 import { loadBudget, normalizeBudget } from "./budget.js";
 import { plan as planIntent } from "./plan.js";
 import { generateBicep } from "./bicep.js";
-import { loadLedger, persistLedger } from "./ledger.js";
+import { loadLedger, persistLedger, REGION_RE, RESOURCE_GROUP_RE } from "./ledger.js";
 import { dryRun } from "./run.js";
 import { diffPlans } from "./diff.js";
 import { buildScaffold, resourceGroupFor, type ScaffoldFile } from "./scaffold.js";
@@ -415,6 +415,22 @@ function cmdLocalDeploy(
   }
   const rg = values["resource-group"] ?? resourceGroupFor(intent, { ledger });
   const region = values.region ?? ledger?.region ?? plan.region;
+  // Reject un-persistable override targeting BEFORE we deploy. `az` accepts region
+  // display names ("West US 2") and non-ASCII RG names, but the ledger we'd write
+  // afterward must be canonical or the next `ship`/re-run can't read it — stranding a
+  // live, billable deploy. Fail fast with actionable guidance instead of after apply.
+  if (values["resource-group"] !== undefined && !RESOURCE_GROUP_RE.test(rg)) {
+    throw new Error(
+      `--resource-group "${rg}" has characters azx can't record in its deploy ledger. ` +
+        `Use letters, digits, and . _ ( ) - only.`,
+    );
+  }
+  if (values.region !== undefined && !REGION_RE.test(region)) {
+    throw new Error(
+      `--region "${region}" must be an Azure region short name (lowercase alphanumeric, ` +
+        `e.g. "westus2"), not a display name.`,
+    );
+  }
   // Pin the subscription: an explicit flag wins, else adopt the one the ledger
   // recorded so a re-run can't silently target whatever `az` account is current
   // (which would duplicate billable infra under the same RG name elsewhere).

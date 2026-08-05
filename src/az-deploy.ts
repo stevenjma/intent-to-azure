@@ -177,7 +177,16 @@ export function runLocalDeploy(
     if (opts.subscriptionId) {
       const set = runner(["account", "set", "--subscription", opts.subscriptionId]);
       if (set.status !== 0) throw new Error(`az account set failed: ${set.stderr.trim()}`);
-      steps.push(`selected subscription ${opts.subscriptionId}`);
+      // `az account set` accepts a subscription NAME as well as a GUID. Re-query the
+      // canonical id so the ledger always records a GUID — otherwise a name like
+      // "Contoso Dev" would be persisted and then rejected by loadLedger on the next
+      // `ship`/re-run, stranding a live deploy behind an unreadable continuity record.
+      const canonical = runner(["account", "show", "--query", "id", "-o", "tsv"]);
+      if (canonical.status === 0) {
+        const id = canonical.stdout.trim();
+        if (id) subscriptionId = id;
+      }
+      steps.push(`selected subscription ${subscriptionId ?? opts.subscriptionId}`);
     }
 
     // 3. Ensure the resource group.

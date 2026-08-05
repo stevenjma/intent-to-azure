@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import type { AppIntent, AzurePlan } from "./types.js";
-import { buildScaffold, type ScaffoldFile, type ScaffoldOptions } from "./scaffold.js";
+import { buildScaffold, slugify, type ScaffoldFile, type ScaffoldOptions } from "./scaffold.js";
 
 /** One planned/executed shell step. */
 export interface ShipStep {
@@ -89,8 +89,12 @@ export function writeScaffoldFiles(dir: string, files: ScaffoldFile[]): void {
 /** Local directory the scaffold is written to for a given repo/options. */
 export function shipOutDir(intent: AppIntent, opts: ShipOptions = {}): string {
   if (opts.outDir) return resolve(opts.outDir);
-  const name = opts.repo ? opts.repo.split("/").pop()! : intent.app.name;
-  return resolve(`azx-deploy-${name}`);
+  // Slugify: `intent.app.name` comes from an untrusted `package.json` and the repo
+  // segment from a user flag. `assertEmptyOutDir` bounds emptiness, not LOCATION, so
+  // an unslugified `"../../.."` name would write (and with --create-repo, `git init`)
+  // outside the intended directory. Slugging pins the write to a safe basename.
+  const raw = opts.repo ? opts.repo.split("/").pop()! : intent.app.name;
+  return resolve(`azx-deploy-${slugify(raw)}`);
 }
 
 /**

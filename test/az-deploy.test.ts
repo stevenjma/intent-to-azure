@@ -37,7 +37,13 @@ function fakeAz(overrides: Record<string, { status: number; stdout?: string; std
       return { status: o.status, stdout: o.stdout ?? "", stderr: o.stderr ?? "" };
     }
     if (args[0] === "account" && args[1] === "show") {
-      return { status: 0, stdout: JSON.stringify({ id: "sub-abc" }), stderr: "" };
+      // A realistic subscription GUID — `az account show` never returns a bare name.
+      const id = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+      // `account show --query id -o tsv` returns the raw id; the default `-o json` form
+      // returns the account object.
+      return args.includes("tsv")
+        ? { status: 0, stdout: id + "\n", stderr: "" }
+        : { status: 0, stdout: JSON.stringify({ id }), stderr: "" };
     }
     return { status: 0, stdout: "", stderr: "" };
   };
@@ -115,7 +121,7 @@ test("apply runs the real create and returns a continuity ledger", () => {
   const led = res.ledger!;
   assert.equal(led.resourceGroup, "rg-django-notes");
   assert.equal(led.region, "eastus2");
-  assert.equal(led.subscriptionId, "sub-abc");
+  assert.equal(led.subscriptionId, "3f2504e0-4f89-41d3-9a0c-0305e82c3301");
   assert.equal(led.deploymentName, "azx-2024-01-01T00-00-00-000Z");
   assert.equal(led.resources.length, plan.resources.length);
   // The template hash is recorded so `ship` can verify a clean adoption.
@@ -165,10 +171,34 @@ test("ship adopts the ledger: pipeline targets the same resource group", () => {
   const wf = buildScaffold(intent, plan, bicep, { ledger: res.ledger }).find(
     (f) => f.path === ".github/workflows/deploy.yml",
   )!.content;
-  assert.ok(wf.includes("RESOURCE_GROUP: rg-django-notes"), "pipeline must reuse the ledger RG");
+  assert.ok(wf.includes('RESOURCE_GROUP: "rg-django-notes"'), "pipeline must reuse the ledger RG");
 
   const readme = buildScaffold(intent, plan, bicep, { ledger: res.ledger }).find(
     (f) => f.path === "README.md",
   )!.content;
   assert.ok(readme.includes("Adopting an existing local deploy"), "README should note adoption");
+});
+
+test("a subscription NAME override is canonicalized to a GUID in the ledger", () => {
+  // `az account set` accepts a subscription NAME, but the ledger must record the
+  // canonical GUID — otherwise the strict loader rejects it on the next ship/re-run.
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz();
+  const res = runLocalDeploy(
+    plan,
+    { ...pgOpts, subscriptionId: "My Subscription Name", apply: true, now: () => FIXED },
+    runner,
+  );
+  assert.equal(res.ledger!.subscriptionId, "3f2504e0-4f89-41d3-9a0c-0305e82c3301");
+  // It re-queried the id after `account set` rather than trusting the raw name.
+  assert.ok(
+    calls.some((a) => a[0] === "account" && a[1] === "set" && a.includes("My Subscription Name")),
+    "pins by the provided name",
+  );
+  assert.ok(
+    calls.some((a) => a[0] === "account" && a[1] === "show" && a.includes("tsv")),
+    "re-queries the canonical id",
+  );
+  // The persisted ledger is one the strict loader would accept.
+  assert.doesNotThrow(() => buildScaffold(build("django-notes").intent, plan, "// b", { ledger: res.ledger! }));
 });

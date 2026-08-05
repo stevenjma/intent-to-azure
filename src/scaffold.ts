@@ -12,6 +12,7 @@
 
 import type { AppIntent, AzurePlan, DeployLedger } from "./types.js";
 import { planNeedsPgPassword } from "./az-deploy.js";
+import { isDeployLedger, REGION_RE, RESOURCE_GROUP_RE } from "./ledger.js";
 
 /** A single file in the generated repo tree (POSIX-style relative path). */
 export interface ScaffoldFile {
@@ -60,6 +61,20 @@ export function buildScaffold(
 ): ScaffoldFile[] {
   const region = opts.region ?? opts.ledger?.region ?? plan.region;
   const rg = resourceGroupFor(intent, opts);
+  // Defend the sink, not just the CLI read boundary: RG/region/subscription get baked
+  // verbatim into generated bash + YAML, so re-assert the same contract here. A CLI
+  // ledger already passed loadLedger, but a library caller (or a future `--ledger`/
+  // remote adoption path) could hand us a raw object or a hostile override — this
+  // makes the generator itself refuse to emit an injectable artifact.
+  if (opts.ledger !== undefined && !isDeployLedger(opts.ledger)) {
+    throw new Error("buildScaffold: refusing to generate from an invalid deploy ledger.");
+  }
+  if (!RESOURCE_GROUP_RE.test(rg)) {
+    throw new Error(`buildScaffold: unsafe resource group "${rg}" — refusing to generate.`);
+  }
+  if (!REGION_RE.test(region)) {
+    throw new Error(`buildScaffold: unsafe region "${region}" — refusing to generate.`);
+  }
   const needsPgPassword = planNeedsPgPassword(plan);
 
   const files: ScaffoldFile[] = [
@@ -182,8 +197,8 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "  cancel-in-progress: false",
     "",
     "env:",
-    `  RESOURCE_GROUP: ${rg}`,
-    `  LOCATION: ${region}`,
+    `  RESOURCE_GROUP: "${rg}"`,
+    `  LOCATION: "${region}"`,
     "",
     "jobs:",
     "  what-if:",

@@ -52,6 +52,19 @@ export type { ScaffoldFile, ScaffoldOptions } from "./scaffold.js";
 export { shipSteps, runShip, shipOutDir } from "./ship.js";
 export type { ShipStep, ShipOptions, ShipPlan, ShipResult, CommandRunner } from "./ship.js";
 
+export {
+  loadLedger,
+  isDeployLedger,
+  persistLedger,
+  ledgerPath,
+  RESOURCE_GROUP_RE,
+  REGION_RE,
+  DEPLOYMENT_NAME_RE,
+  SUBSCRIPTION_ID_RE,
+  ISO_INSTANT_RE,
+  TEMPLATE_HASH_RE,
+} from "./ledger.js";
+
 export { runLocalDeploy, planNeedsPgPassword, defaultAzRunner } from "./az-deploy.js";
 export type { AzRunner, AzResult, LocalDeployOptions, LocalDeployResult } from "./az-deploy.js";
 

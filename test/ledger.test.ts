@@ -114,6 +114,51 @@ test("isDeployLedger rejects an empty subscriptionId (silent wrong-account fallb
   assert.equal(isDeployLedger({ ...VALID, subscriptionId: "" }), false);
 });
 
+test("isDeployLedger validates deployedAt as an ISO instant (it reaches generated README)", () => {
+  // `deployedAt` is interpolated into the generated README markdown that `ship
+  // --create-repo` pushes to a real repo — a hostile value is content injection.
+  assert.equal(isDeployLedger({ ...VALID, deployedAt: "not a date" }), false);
+  assert.equal(isDeployLedger({ ...VALID, deployedAt: "2026-01-01" }), false);
+  assert.equal(isDeployLedger({ ...VALID, deployedAt: "2026-01-01T00:00:00Z\n# INJECT" }), false);
+  assert.equal(isDeployLedger({ ...VALID, deployedAt: "" }), false);
+  assert.equal(isDeployLedger({ ...VALID, deployedAt: 0 }), false);
+  // Millis are optional.
+  assert.equal(isDeployLedger({ ...VALID, deployedAt: "2026-01-01T00:00:00.123Z" }), true);
+});
+
+test("isDeployLedger validates optional partial/templateHash and resource entries", () => {
+  assert.equal(isDeployLedger({ ...VALID, partial: true }), true);
+  assert.equal(isDeployLedger({ ...VALID, partial: "yes" }), false);
+  assert.equal(isDeployLedger({ ...VALID, templateHash: "a".repeat(64) }), true);
+  assert.equal(isDeployLedger({ ...VALID, templateHash: "deadBEEF" + "0".repeat(56) }), false); // uppercase
+  assert.equal(isDeployLedger({ ...VALID, templateHash: "abc123" }), false); // too short
+  assert.equal(isDeployLedger({ ...VALID, templateHash: "not-hex!" }), false);
+  assert.equal(isDeployLedger({ ...VALID, templateHash: "" }), false);
+  // A resource element carrying CR/LF or a non-string field is rejected.
+  assert.equal(
+    isDeployLedger({ ...VALID, resources: [{ id: "a\nb", name: "app", type: "t" }] }),
+    false,
+  );
+  assert.equal(isDeployLedger({ ...VALID, resources: [{ id: "a", name: 7, type: "t" }] }), false);
+  assert.equal(isDeployLedger({ ...VALID, resources: [null] }), false);
+});
+
+test("persistLedger refuses to write a ledger azx would later reject (no self-lockout)", () => {
+  const root = tmpRoot();
+  try {
+    // A non-canonical subscriptionId (a name, not a GUID) must never be persisted:
+    // the strict loader would reject it on the next `ship`/re-run.
+    assert.throws(
+      () => persistLedger(root, { ...VALID, subscriptionId: "My Subscription" } as DeployLedger),
+      /invalid|reject/i,
+    );
+    // Nothing should have been written.
+    assert.equal(loadLedger(root), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("isDeployLedger accepts a real ledger with populated resource entries", () => {
   const withResources = {
     ...VALID,
