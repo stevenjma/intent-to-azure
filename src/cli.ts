@@ -382,6 +382,41 @@ function cmdUp(repoArg: string, values: Values, c: Color): number {
 }
 
 /**
+ * Load the deploy ledger, but let EXPLICIT targeting flags recover from an
+ * *unreadable* one. A corrupt/truncated ledger — or one written by a pre-hardening
+ * azx — otherwise fails loud with only "fix or delete it", and deleting it destroys
+ * the sole record of live, billable infra. When the operator supplies explicit
+ * targeting (`--resource-group` / `--region` / `--subscription-id`), we treat the
+ * bad ledger as absent, warn loudly, and proceed with the targeting they asserted;
+ * the next successful local deploy overwrites it with a fresh, valid ledger. An
+ * ABSENT ledger (undefined) is a normal greenfield — only a THROW is recoverable,
+ * and only with an explicit override so we never silently ignore a corrupt record.
+ */
+function loadLedgerWithRecovery(
+  root: string,
+  values: Values,
+  c: Color,
+): { ledger: DeployLedger | undefined; recovered: boolean } {
+  try {
+    return { ledger: loadLedger(root), recovered: false };
+  } catch (err) {
+    const hasOverride =
+      values["resource-group"] !== undefined ||
+      values.region !== undefined ||
+      values["subscription-id"] !== undefined;
+    if (!hasOverride) throw err;
+    process.stdout.write(
+      c.yellow(
+        "⚠ .azx/deploy.json is unreadable — ignoring it and using your explicit targeting.\n" +
+          `  (${(err as Error).message})\n` +
+          "  A fresh, valid ledger will be written on the next successful local deploy.\n\n",
+      ),
+    );
+    return { ledger: undefined, recovered: true };
+  }
+}
+
+/**
  * `azx up <path> --local-deploy [--yes] [--resource-group r] [--region x]
  *                               [--pg-password p] [--subscription-id id]`
  *
@@ -407,7 +442,7 @@ function cmdLocalDeploy(
 
   let ledger: DeployLedger | undefined;
   try {
-    ledger = loadLedger(root);
+    ({ ledger } = loadLedgerWithRecovery(root, values, c));
   } catch (err) {
     process.stdout.write(banner(c, `deploy ${intent.app.name}`));
     process.stdout.write("\n" + c.red("✗ " + (err as Error).message) + "\n");
@@ -560,8 +595,9 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
   const { intent, plan, bicep } = buildAll(root, values);
 
   let ledger: DeployLedger | undefined;
+  let recovered = false;
   try {
-    ledger = loadLedger(root);
+    ({ ledger, recovered } = loadLedgerWithRecovery(root, values, c));
   } catch (err) {
     if (values.json) {
       process.stdout.write(JSON.stringify({ error: (err as Error).message }, null, 2) + "\n");
@@ -576,6 +612,13 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
     visibility: (values.private === false ? "public" : "private") as "public" | "private",
     deploy: values.deploy,
     outDir: values.out,
+    // Normally `ship` targets via the adopted ledger (or plan defaults) and ignores
+    // these flags. Only when RECOVERING from an unreadable ledger do we honor the
+    // operator's explicit targeting so the scaffold can still pin the live RG/region.
+    // buildScaffold re-validates both against its safe charsets before generating.
+    ...(recovered
+      ? { resourceGroup: values["resource-group"], region: values.region }
+      : {}),
     ledger,
   };
 
