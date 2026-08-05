@@ -1,7 +1,7 @@
 {
   "name": "azx",
   "version": "0.1.0",
-  "description": "App Intent Service — point at your repo, we figure out what the app needs, Azure runs it. POC #1: an offline dry-run engine that reads an AI-native app repo, emits an open App Intent contract, plans the Azure resource graph, and generates Bicep. No real Azure calls.",
+  "description": "App Intent Service — point at your repo, we figure out what the app needs, Azure runs it. Reads an AI-native app repo, emits an open App Intent contract, plans the Azure resource graph, and generates Bicep + a CI/CD pipeline. Preview commands run offline; opt-in `up --local-deploy` (via az) and `ship --create-repo` (via git/gh + OIDC) perform the real Azure deploy.",
   "type": "module",
   "license": "MIT",
   "main": "dist/src/index.js",

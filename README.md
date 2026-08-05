@@ -541,10 +541,11 @@ SPEC.md         human-readable contract spec
 ## Scope & guardrails
 
 - Backend/engine first — **no web UI**.
-- The engine itself makes **no Azure calls** — it generates and previews. The real
-  Azure deploy is delegated to the CI/CD pipeline `ship` scaffolds, run via OIDC in
-  the created GitHub repo. `ship --create-repo` is the only path that touches the
-  network (git + `gh`); everything else runs fully offline with zero cloud credentials.
+- The default commands (`scan`/`plan`/`bicep`/`what-if`/`up`) generate and preview
+  offline. Two opt-in paths reach the network/cloud: `up --local-deploy --yes` runs
+  the real Azure deploy locally through your `az` CLI, and `ship --create-repo` uses
+  git + `gh` to create the repo whose OIDC pipeline then deploys. Everything else runs
+  fully offline with zero cloud credentials.
 - No invented SKUs/regions beyond the MVP mapping; uncertainty becomes a confirmation.
 
 ## License

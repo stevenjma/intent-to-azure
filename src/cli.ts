@@ -32,7 +32,7 @@ import { loadLedger, persistLedger } from "./ledger.js";
 import { dryRun } from "./run.js";
 import { diffPlans } from "./diff.js";
 import { buildScaffold, resourceGroupFor, type ScaffoldFile } from "./scaffold.js";
-import { shipSteps, runShip, writeScaffoldFiles, type ShipStep } from "./ship.js";
+import { shipSteps, runShip, writeScaffoldFiles, assertEmptyOutDir, type ShipStep } from "./ship.js";
 import { runLocalDeploy, DeployError } from "./az-deploy.js";
 import type { AppIntent, AzurePlan, ChangeAction, Confirmation, Guardrails, BudgetContext, Confidence, PlanDiff, DeployLedger } from "./types.js";
 
@@ -191,8 +191,10 @@ function cmdPlan(repoArg: string, values: Values, c: Color): number {
   // to disk as inert code — the "all the code, not tied to a live repo" mode.
   let scaffoldFiles: ScaffoldFile[] | undefined;
   if (values.scaffold) {
+    const target = resolve(values.scaffold);
+    assertEmptyOutDir(target);
     scaffoldFiles = buildScaffold(intent, plan, bicep, { ledger: loadLedger(root) });
-    writeScaffoldFiles(resolve(values.scaffold), scaffoldFiles);
+    writeScaffoldFiles(target, scaffoldFiles);
   }
 
   if (values.json) {
@@ -436,37 +438,64 @@ function cmdLocalDeploy(
     });
   } catch (err) {
     // A partial failure still created a real (billable) resource group — persist
-    // its ledger so `ship` and the user can reconcile or tear it down.
+    // its ledger so `ship` and the user can reconcile or tear it down. If persisting
+    // ITSELF fails (disk full, permissions, rename), that must NOT swallow the far
+    // more important "you have live resources — here's how to tear them down" guidance.
     let partialPath: string | undefined;
+    let ledgerWriteError: string | undefined;
     if (err instanceof DeployError && err.ledger) {
-      partialPath = persistLedger(root, err.ledger);
+      try {
+        partialPath = persistLedger(root, err.ledger);
+      } catch (writeErr) {
+        ledgerWriteError = (writeErr as Error).message;
+      }
     }
+    const hasLiveResources = err instanceof DeployError && !!err.ledger;
     if (values.json) {
       process.stdout.write(
-        JSON.stringify({ error: (err as Error).message, ledgerPath: partialPath }, null, 2) + "\n",
+        JSON.stringify(
+          { error: (err as Error).message, ledgerPath: partialPath, ledgerWriteError },
+          null,
+          2,
+        ) + "\n",
       );
     } else {
       process.stdout.write(banner(c, `deploy ${intent.app.name}`));
       process.stdout.write("\n" + c.red("✗ " + (err as Error).message) + "\n");
-      if (partialPath) {
+      if (hasLiveResources) {
         process.stdout.write(
           c.yellow(
-            `  ⚠ Partial deploy — resource group ${rg} may hold live resources. Ledger: ${partialPath}\n`,
-          ) + c.dim(`  Tear it down with: az group delete -n ${rg} --yes --no-wait\n`),
+            `  ⚠ Partial deploy — resource group ${rg} may hold live resources.\n`,
+          ),
         );
+        if (partialPath) {
+          process.stdout.write(c.dim(`  Ledger: ${partialPath}\n`));
+        } else if (ledgerWriteError) {
+          process.stdout.write(
+            c.yellow(`  ⚠ Could not write the reconciliation ledger: ${ledgerWriteError}\n`),
+          );
+        }
+        process.stdout.write(c.dim(`  Tear it down with: az group delete -n ${rg} --yes --no-wait\n`));
       }
     }
     return 1;
   }
 
-  // Persist the ledger on a real apply so `ship` can adopt this deployment.
+  // Persist the ledger on a real apply so `ship` can adopt this deployment. A write
+  // failure here can't undo the deploy — surface it loudly (the resources ARE live)
+  // rather than crashing after a successful apply.
   let ledgerPath: string | undefined;
+  let ledgerWriteError: string | undefined;
   if (result.ledger) {
-    ledgerPath = persistLedger(root, result.ledger);
+    try {
+      ledgerPath = persistLedger(root, result.ledger);
+    } catch (writeErr) {
+      ledgerWriteError = (writeErr as Error).message;
+    }
   }
 
   if (values.json) {
-    process.stdout.write(JSON.stringify({ ...result, ledgerPath }, null, 2) + "\n");
+    process.stdout.write(JSON.stringify({ ...result, ledgerPath, ledgerWriteError }, null, 2) + "\n");
     return 0;
   }
 
@@ -478,7 +507,18 @@ function cmdLocalDeploy(
   }
   if (result.applied) {
     process.stdout.write("\n" + c.bold("Deployed.") + " Real Azure resources are live.\n");
-    if (ledgerPath) process.stdout.write(c.dim(`  ledger written to ${ledgerPath}\n`));
+    if (ledgerPath) {
+      process.stdout.write(c.dim(`  ledger written to ${ledgerPath}\n`));
+    } else if (ledgerWriteError) {
+      process.stdout.write(
+        c.yellow(
+          `  ⚠ Resources are live but the ledger could NOT be written: ${ledgerWriteError}\n`,
+        ) +
+          c.dim(
+            `  Record resource group ${rg} (region ${region}) yourself so you can reconcile or tear it down.\n`,
+          ),
+      );
+    }
     process.stdout.write(
       c.dim(`  Harden it into a reviewed pipeline: azx ship ${basename(root)} --create-repo <owner/name>\n`),
     );
@@ -599,7 +639,10 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
 
   // Dry run: plan the steps, write scaffold if --out given, print what would run.
   const planned = shipSteps(intent, plan, bicep, shipOpts);
-  if (values.out) writeScaffoldFiles(planned.outDir, planned.files);
+  if (values.out) {
+    assertEmptyOutDir(planned.outDir);
+    writeScaffoldFiles(planned.outDir, planned.files);
+  }
 
   if (values.json) {
     process.stdout.write(JSON.stringify({ ...planned, executed: false, adoption }, null, 2) + "\n");

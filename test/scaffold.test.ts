@@ -19,7 +19,7 @@ import { parse as parseYaml } from "yaml";
 
 import { resolveRepo } from "../src/index.js";
 import { buildScaffold } from "../src/scaffold.js";
-import { shipSteps, runShip, type ShipStep } from "../src/ship.js";
+import { shipSteps, runShip, assertEmptyOutDir, type ShipStep } from "../src/ship.js";
 import { fileURLToPath } from "node:url";
 
 const FIXED = new Date("2024-01-01T00:00:00.000Z");
@@ -248,12 +248,32 @@ test("setup script pre-creates the RG and scopes Contributor to it, not the subs
   assert.ok(script.includes('az account set --subscription "$SUBSCRIPTION"'), "pins the subscription");
 });
 
+test("setup script refuses implicit Entra app reuse and supports explicit --app-id", () => {
+  const { intent, plan, bicep } = build("contoso-marketing");
+  const script = buildScaffold(intent, plan, bicep).find(
+    (f) => f.path === "scripts/setup-azure-oidc.sh",
+  )!.content;
+  // An --app-id flag exists for intentional reuse.
+  assert.ok(script.includes("--app-id) APP_ID_ARG="), "parses an explicit --app-id flag");
+  // When no --app-id is given, an app already matching the display name is a hard stop
+  // (reuse could inherit stale credentials/roles), not a silent `[0]` pickup.
+  assert.ok(
+    !script.includes("[0].appId"),
+    "must not silently reuse the first app matching the display name",
+  );
+  assert.ok(
+    script.includes("refusing to reuse an existing app"),
+    "refuses implicit reuse with an actionable message",
+  );
+  assert.ok(script.includes("exit 1"), "collision is a hard failure");
+});
+
 test("setup script defaults the subscription from the deploy ledger when present", () => {
   const { intent, plan, bicep } = build("contoso-marketing");
   const ledger = {
     generatedBy: "azx" as const,
     deployedAt: "2026-01-01T00:00:00Z",
-    subscriptionId: "sub-abc-123",
+    subscriptionId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
     resourceGroup: "rg-contoso-marketing",
     region: "swedencentral",
     deploymentName: "azx-1",
@@ -263,7 +283,7 @@ test("setup script defaults the subscription from the deploy ledger when present
     (f) => f.path === "scripts/setup-azure-oidc.sh",
   )!.content;
   assert.ok(
-    withLedger.includes('DEFAULT_SUBSCRIPTION="sub-abc-123"'),
+    withLedger.includes('DEFAULT_SUBSCRIPTION="3f2504e0-4f89-41d3-9a0c-0305e82c3301"'),
     "bakes the ledger's subscription as the default",
   );
   // Without a ledger, the default is empty (falls back to the current az account).
@@ -293,6 +313,22 @@ test("runShip refuses to publish into a non-empty directory", () => {
       () => runShip(intent, plan, bicep, { outDir: dir, repo: "acme/notes" }, () => {}),
       /already exists and is not empty/,
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("assertEmptyOutDir guards the dry-run --out writer the same way as runShip", () => {
+  // The CLI's dry-run `--out` writer calls this same guard before writing a scaffold,
+  // so a stray/secret-bearing directory can't be silently overwritten there either.
+  const dir = mkdtempSync(join(tmpdir(), "azx-out-guard-"));
+  try {
+    // Empty dir (and a brand-new path) are both fine.
+    assert.doesNotThrow(() => assertEmptyOutDir(dir));
+    assert.doesNotThrow(() => assertEmptyOutDir(join(dir, "does-not-exist-yet")));
+    // A non-empty dir is refused.
+    writeFileSync(join(dir, "keep.txt"), "existing file");
+    assert.throws(() => assertEmptyOutDir(dir), /already exists and is not empty/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

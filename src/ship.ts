@@ -60,6 +60,20 @@ export interface ShipResult extends ShipPlan {
 export type CommandRunner = (step: ShipStep, cwd: string) => void;
 
 /**
+ * Guard: refuse to write a scaffold into a directory that already holds files we
+ * don't own. Both the real ship (which creates + pushes a repo) and the dry-run
+ * `--out` writer use this so neither can clobber or publish unrelated files/secrets.
+ */
+export function assertEmptyOutDir(dir: string): void {
+  if (existsSync(dir) && readdirSync(dir).length > 0) {
+    throw new Error(
+      `output directory ${dir} already exists and is not empty — refusing to write the ` +
+        `scaffold over it. Point --out at a new/empty directory.`,
+    );
+  }
+}
+
+/**
  * Write a scaffold file tree under `dir`, creating parent directories. Shell
  * scripts (`*.sh`) are written executable so the shipped OIDC setup script can be
  * run directly. Shared by {@link runShip} and the CLI's dry-run `--out` writer.
@@ -168,12 +182,7 @@ export function runShip(
   // Refuse to publish into a dir that already holds files we don't own: `runShip`
   // creates a real repo and pushes it, so an existing dir could leak unrelated
   // files (or secrets) into the new public/private repo. Require new-or-empty.
-  if (existsSync(planned.outDir) && readdirSync(planned.outDir).length > 0) {
-    throw new Error(
-      `ship target ${planned.outDir} already exists and is not empty — refusing to ` +
-        `create + push a repo over it. Use --out to point at a new/empty directory.`,
-    );
-  }
+  assertEmptyOutDir(planned.outDir);
 
   writeScaffoldFiles(planned.outDir, planned.files);
 
