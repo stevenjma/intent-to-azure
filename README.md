@@ -7,9 +7,12 @@
 *what the app needs* as an open, **capability-shaped** contract, resolves that to a concrete
 Azure resource graph, and generates Bicep. You never describe the app or write a config file.
 
-**POC #1 is a dry-run engine.** It is 100% offline: it **never calls Azure or GitHub**. It
-reads local files, prints a plan, and emits Bicep you can review. `plan` and `apply` are kept
-strictly separate — this POC only ever *generates and previews*.
+**The default flow is a dry-run engine.** `plan`, `bicep`, `what-if`, and plain `up`
+are 100% offline: they **never call Azure or GitHub** — they read local files, print a
+plan, and emit Bicep you can review. Real deployment is **opt-in and explicit**: `up
+--local-deploy` runs `az` on your machine, and `ship --create-repo` creates a GitHub
+repo whose pipeline deploys via OIDC (see [Deploy for real](#deploy-for-real-two-phases)). `plan`
+and `apply` are always kept separate — nothing deploys unless you ask for it.
 
 ```
 ┌──────────┐   reads code    ┌───────────────┐   resolves      ┌──────────────┐
@@ -89,8 +92,9 @@ Postgres / pgvector · OpenAI / Anthropic / Azure OpenAI · GitHub Actions) neve
 wrong guess — they surface as a **confirmation card** you resolve, or you supply an
 escape-hatch declarative file. Uncertain SKUs and regions are never invented.
 
-> **Dry-run only.** POC #1 never calls Azure. `azx` reads files, prints a plan, and emits
-> Bicep for you to review — `plan` and `apply` stay strictly separate.
+> **Preview by default.** `plan`, `bicep`, `what-if`, and plain `up` never call Azure —
+> `azx` reads files, prints a plan, and emits Bicep for you to review. Deploying is a
+> separate, explicit opt-in (`up --local-deploy`, `ship --create-repo`).
 
 ---
 
@@ -384,8 +388,11 @@ azx up /path/to/app --local-deploy --yes \
 
 What happens: `az account show` (auth gate) → `az group create` → `az deployment
 group what-if` (gate) → `az deployment group create`. On success it writes
-`/path/to/app/.azx/deploy.json` — the continuity ledger. Your app is now live in
-`rg-<app>`.
+`/path/to/app/.azx/deploy.json` — the continuity ledger. Your Azure **infrastructure**
+is now live in `rg-<app>` — but the Container App runs Microsoft's placeholder
+quickstart image (`mcr.microsoft.com/k8se/quickstart`), not your code, until you build
+and push your own container image to the app. This provisions the platform; shipping
+your app image is the next step.
 
 **2. Codify / harden — hand the deploy to a reviewed pipeline (declarative)**
 
@@ -407,14 +414,18 @@ gh auth login
 ```
 
 This federates the two subjects the pipeline authenticates as
-(`ref:refs/heads/main` and `environment:production`) and sets the repo **variables**
-`AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` (no secret stored).
-Then, in the generated repo:
+(`ref:refs/heads/main` and `environment:production`), **pre-creates the resource group
+and grants the app Contributor scoped to that resource group only** (not the whole
+subscription), and sets the repo **variables** `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` /
+`AZURE_SUBSCRIPTION_ID` (no secret stored). Then, in the generated repo:
 
 - add a repo **secret** `PG_ADMIN_PASSWORD` if your app provisions Postgres (it must
-  match the `--pg-password` you used in Phase 1, or the first what-if won't be a no-op), and
+  match the `--pg-password` you used in Phase 1, or the first what-if won't be a no-op),
 - (recommended) in **Settings → Environments**, add required reviewers to
-  `production` so the real deploy waits on approval.
+  `production` so the real deploy waits on approval, and
+- (recommended) protect `main`. The what-if job needs deploy-equivalent rights, so
+  branch protection is the compensating control that keeps the `main` credential from
+  acting inside the resource group without review.
 
 **4. Deploy through the pipeline & verify the clean handoff**
 

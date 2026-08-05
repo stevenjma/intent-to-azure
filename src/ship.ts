@@ -13,7 +13,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import type { AppIntent, AzurePlan } from "./types.js";
@@ -96,7 +96,14 @@ export function shipSteps(
 
   const steps: ShipStep[] = [
     { cmd: "git", args: ["init", "-b", "main"], description: "initialize a git repo on the main branch" },
-    { cmd: "git", args: ["add", "-A"], description: "stage the generated scaffold" },
+    {
+      cmd: "git",
+      // Stage ONLY the files azx generated — never `git add -A`. The scaffold lands in
+      // a dedicated dir (see runShip's empty-dir guard), but staging by explicit path
+      // means even a stray/pre-existing file can't be committed and pushed by accident.
+      args: ["add", "--", ...files.map((f) => f.path)],
+      description: "stage the generated scaffold files",
+    },
     {
       cmd: "git",
       args: ["commit", "-m", "chore: azx-generated infrastructure + deploy pipeline"],
@@ -157,6 +164,16 @@ export function runShip(
   runner: CommandRunner = defaultRunner(),
 ): ShipResult {
   const planned = shipSteps(intent, plan, bicep, opts);
+
+  // Refuse to publish into a dir that already holds files we don't own: `runShip`
+  // creates a real repo and pushes it, so an existing dir could leak unrelated
+  // files (or secrets) into the new public/private repo. Require new-or-empty.
+  if (existsSync(planned.outDir) && readdirSync(planned.outDir).length > 0) {
+    throw new Error(
+      `ship target ${planned.outDir} already exists and is not empty — refusing to ` +
+        `create + push a repo over it. Use --out to point at a new/empty directory.`,
+    );
+  }
 
   writeScaffoldFiles(planned.outDir, planned.files);
 

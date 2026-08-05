@@ -28,6 +28,7 @@ import { loadGuardrails, parseGuardrails } from "./guardrails.js";
 import { loadBudget, normalizeBudget } from "./budget.js";
 import { plan as planIntent } from "./plan.js";
 import { generateBicep } from "./bicep.js";
+import { loadLedger, persistLedger } from "./ledger.js";
 import { dryRun } from "./run.js";
 import { diffPlans } from "./diff.js";
 import { buildScaffold, resourceGroupFor, type ScaffoldFile } from "./scaffold.js";
@@ -402,9 +403,20 @@ function cmdLocalDeploy(
     return 1;
   }
 
-  const ledger = loadLedger(root);
+  let ledger: DeployLedger | undefined;
+  try {
+    ledger = loadLedger(root);
+  } catch (err) {
+    process.stdout.write(banner(c, `deploy ${intent.app.name}`));
+    process.stdout.write("\n" + c.red("✗ " + (err as Error).message) + "\n");
+    return 1;
+  }
   const rg = values["resource-group"] ?? resourceGroupFor(intent, { ledger });
   const region = values.region ?? ledger?.region ?? plan.region;
+  // Pin the subscription: an explicit flag wins, else adopt the one the ledger
+  // recorded so a re-run can't silently target whatever `az` account is current
+  // (which would duplicate billable infra under the same RG name elsewhere).
+  const subscriptionId = values["subscription-id"] ?? ledger?.subscriptionId;
   const apply = !!values.yes;
 
   // The `az deployment` calls need main.bicep on disk. Write it to a throwaway
@@ -418,7 +430,7 @@ function cmdLocalDeploy(
       bicepPath,
       resourceGroup: rg,
       region,
-      subscriptionId: values["subscription-id"],
+      subscriptionId,
       pgPassword: values["pg-password"],
       apply,
     });
@@ -476,25 +488,6 @@ function cmdLocalDeploy(
   return 0;
 }
 
-/** Load a local-deploy ledger from `<root>/.azx/deploy.json`, if one exists. */
-function loadLedger(root: string): DeployLedger | undefined {
-  const p = join(root, ".azx", "deploy.json");
-  try {
-    return JSON.parse(readFileSync(p, "utf8")) as DeployLedger;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Write a ledger to `<root>/.azx/deploy.json`, returning the path written. */
-function persistLedger(root: string, ledger: DeployLedger): string {
-  const azxDir = join(root, ".azx");
-  mkdirSync(azxDir, { recursive: true });
-  const p = join(azxDir, "deploy.json");
-  writeFileSync(p, JSON.stringify(ledger, null, 2) + "\n");
-  return p;
-}
-
 /**
  * `azx ship <path> [--create-repo owner/name] [--deploy] [--private] [--out dir]`
  *
@@ -510,7 +503,18 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
   const root = resolve(repoArg);
   const { intent, plan, bicep } = buildAll(root, values);
 
-  const ledger = loadLedger(root);
+  let ledger: DeployLedger | undefined;
+  try {
+    ledger = loadLedger(root);
+  } catch (err) {
+    if (values.json) {
+      process.stdout.write(JSON.stringify({ error: (err as Error).message }, null, 2) + "\n");
+    } else {
+      process.stdout.write(banner(c, `ship ${intent.app.name}`));
+      process.stdout.write("\n" + c.red("✗ " + (err as Error).message) + "\n");
+    }
+    return 1;
+  }
   const shipOpts = {
     repo: values["create-repo"],
     visibility: (values.private === false ? "public" : "private") as "public" | "private",

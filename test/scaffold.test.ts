@@ -12,7 +12,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse as parseYaml } from "yaml";
@@ -210,6 +210,92 @@ test("shipSteps: no repo → git-only; --create-repo adds gh create; --deploy ad
     publicRepo.steps.some((s) => s.args.includes("--public")),
     "visibility: public should pass --public",
   );
+});
+
+test("neither pipeline job runs `az group create` (RG is pre-created, principal is RG-scoped)", () => {
+  const { intent, plan, bicep } = build("contoso-marketing");
+  const wf = buildScaffold(intent, plan, bicep).find(
+    (f) => f.path === ".github/workflows/deploy.yml",
+  )!.content;
+  const doc = parseYaml(wf) as any;
+  const allSteps = JSON.stringify([doc.jobs["what-if"].steps, doc.jobs.deploy.steps]);
+  assert.ok(
+    !allSteps.includes("az group create"),
+    "pipeline must not create resource groups — the RG-scoped principal can't, and setup pre-creates it",
+  );
+});
+
+test("setup script pre-creates the RG and scopes Contributor to it, not the subscription", () => {
+  const { intent, plan, bicep } = build("contoso-marketing");
+  const script = buildScaffold(intent, plan, bicep).find(
+    (f) => f.path === "scripts/setup-azure-oidc.sh",
+  )!.content;
+  // Bakes the concrete RG + region so the human running it targets the same place.
+  assert.ok(/RESOURCE_GROUP="rg-contoso-marketing"/.test(script), "bakes the resolved resource group");
+  assert.ok(/LOCATION="/.test(script), "bakes the resolved region");
+  // Pre-creates the RG as the human (full rights) before the RG-scoped grant.
+  assert.ok(script.includes('az group create -n "$RESOURCE_GROUP"'), "pre-creates the resource group");
+  // Contributor is scoped to the RG, NOT the whole subscription.
+  assert.ok(
+    script.includes("/subscriptions/${SUBSCRIPTION}/resourceGroups/${RESOURCE_GROUP}"),
+    "Contributor scope is the resource group",
+  );
+  assert.ok(
+    !/scope="\/subscriptions\/\$\{SUBSCRIPTION\}"/.test(script),
+    "must not grant Contributor at subscription scope",
+  );
+  // Pins the subscription so the RG + role assignment can't land in a stray account.
+  assert.ok(script.includes('az account set --subscription "$SUBSCRIPTION"'), "pins the subscription");
+});
+
+test("setup script defaults the subscription from the deploy ledger when present", () => {
+  const { intent, plan, bicep } = build("contoso-marketing");
+  const ledger = {
+    generatedBy: "azx" as const,
+    deployedAt: "2026-01-01T00:00:00Z",
+    subscriptionId: "sub-abc-123",
+    resourceGroup: "rg-contoso-marketing",
+    region: "swedencentral",
+    deploymentName: "azx-1",
+    resources: [],
+  };
+  const withLedger = buildScaffold(intent, plan, bicep, { ledger }).find(
+    (f) => f.path === "scripts/setup-azure-oidc.sh",
+  )!.content;
+  assert.ok(
+    withLedger.includes('DEFAULT_SUBSCRIPTION="sub-abc-123"'),
+    "bakes the ledger's subscription as the default",
+  );
+  // Without a ledger, the default is empty (falls back to the current az account).
+  const noLedger = buildScaffold(intent, plan, bicep).find(
+    (f) => f.path === "scripts/setup-azure-oidc.sh",
+  )!.content;
+  assert.ok(noLedger.includes('DEFAULT_SUBSCRIPTION=""'), "no ledger → empty default subscription");
+});
+
+test("shipSteps stages only the generated files, never `git add -A`", () => {
+  const { intent, plan, bicep } = build("django-notes");
+  const { files, steps } = shipSteps(intent, plan, bicep);
+  const add = steps.find((s) => s.cmd === "git" && s.args[0] === "add")!;
+  assert.ok(!add.args.includes("-A"), "must not blanket-stage the working tree");
+  assert.equal(add.args[1], "--", "stages by explicit pathspec after a `--` separator");
+  // Every generated file is staged explicitly; nothing else can be.
+  const staged = add.args.slice(2);
+  assert.deepEqual([...staged].sort(), files.map((f) => f.path).sort());
+});
+
+test("runShip refuses to publish into a non-empty directory", () => {
+  const { intent, plan, bicep } = build("django-notes");
+  const dir = mkdtempSync(join(tmpdir(), "azx-ship-nonempty-"));
+  try {
+    writeFileSync(join(dir, "stray-secret.txt"), "do not publish me");
+    assert.throws(
+      () => runShip(intent, plan, bicep, { outDir: dir, repo: "acme/notes" }, () => {}),
+      /already exists and is not empty/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("runShip writes the scaffold to disk and runs each step in that dir", () => {
