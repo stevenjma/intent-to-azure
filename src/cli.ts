@@ -648,6 +648,20 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
     }
     return 1;
   }
+  // When the ledger is valid we target via it (or plan defaults) and ignore any
+  // explicit targeting flags. Tell the operator so a silently-ignored
+  // --resource-group/--region/--subscription-id doesn't become a support ticket.
+  if (!recovered && !values.json) {
+    const ignored = (["resource-group", "region", "subscription-id"] as const).filter(
+      (f) => values[f] !== undefined,
+    );
+    if (ignored.length > 0) {
+      process.stderr.write(
+        `⚠ ignoring ${ignored.map((f) => "--" + f).join(", ")} — the adopted ledger targets the deployment.\n`,
+      );
+    }
+  }
+
   const shipOpts = {
     repo: values["create-repo"],
     visibility: (values.private === false ? "public" : "private") as "public" | "private",
@@ -750,7 +764,9 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
   }
 
   if (values.json) {
-    process.stdout.write(JSON.stringify({ ...planned, executed: false, adoption }, null, 2) + "\n");
+    process.stdout.write(
+      JSON.stringify({ ...planned, executed: false, adoption, recovered }, null, 2) + "\n",
+    );
     return 0;
   }
 

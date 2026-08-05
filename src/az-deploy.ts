@@ -91,6 +91,12 @@ export function planNeedsPgPassword(plan: AzurePlan): boolean {
  * contain spaces (e.g. a `%TEMP%` under `C:\Users\First Last\...`) or an arg with
  * a metacharacter without word-splitting or command injection. We never rely on
  * Node's `shell:true` arg joining, which sets windowsVerbatimArguments (no quoting).
+ *
+ * Caveat: this is NOT MSVCRT-correct for an argument that ends in a backslash (the
+ * receiving `az.cmd` -> python argv parser would treat the trailing `\"` as an
+ * escaped quote). All args we pass either end in a filename (`main.bicep`,
+ * `azx.params.json`) or are charset-bounded (GUID / slug / lowercase-alnum), so no
+ * live arg ends in `\`. Revisit this if a bare directory path is ever passed.
  */
 export function winQuoteArg(arg: string): string {
   return `"${arg.replace(/"/g, '""')}"`;
@@ -116,7 +122,14 @@ export function defaultAzRunner(): AzRunner {
       }
       throw res.error;
     }
-    return { status: res.status ?? 1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+    // On Windows a missing `az` does NOT surface as ENOENT (cmd.exe runs fine and
+    // reports the shim missing), so map its "'az' is not recognized" to the same
+    // friendly guidance a POSIX ENOENT would give.
+    const stderr = res.stderr ?? "";
+    if (isWin && (res.status ?? 1) !== 0 && /'az' is not recognized/i.test(stderr)) {
+      throw new Error("Azure CLI not found on PATH. Install `az` and run `az login`.");
+    }
+    return { status: res.status ?? 1, stdout: res.stdout ?? "", stderr };
   };
 }
 
