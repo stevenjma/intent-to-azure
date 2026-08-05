@@ -12,7 +12,7 @@
 
 import type { AppIntent, AzurePlan, DeployLedger } from "./types.js";
 import { planNeedsPgPassword } from "./az-deploy.js";
-import { isDeployLedger, REGION_RE, RESOURCE_GROUP_RE } from "./ledger.js";
+import { isDeployLedger, REGION_RE, RESOURCE_GROUP_RE, SUBSCRIPTION_ID_RE } from "./ledger.js";
 
 /** A single file in the generated repo tree (POSIX-style relative path). */
 export interface ScaffoldFile {
@@ -27,6 +27,14 @@ export interface ScaffoldOptions {
   resourceGroup?: string;
   /** Override the deploy region; defaults to `plan.region`. */
   region?: string;
+  /**
+   * Pin the subscription baked into the OIDC setup script's `DEFAULT_SUBSCRIPTION`.
+   * Defaults to the adopted ledger's subscription. Set explicitly only on the
+   * recovery path (unreadable ledger + operator-asserted `--subscription-id`) so the
+   * generated setup script targets the operator's subscription, not `az`'s current
+   * account. Validated against `SUBSCRIPTION_ID_RE` before it reaches the script.
+   */
+  subscriptionId?: string;
   /**
    * A local-deploy ledger (`.azx/deploy.json`) to adopt. When present, the
    * scaffold pins the same resource group + region so the codified pipeline's
@@ -75,6 +83,13 @@ export function buildScaffold(
   if (!REGION_RE.test(region)) {
     throw new Error(`buildScaffold: unsafe region "${region}" — refusing to generate.`);
   }
+  // The subscription is baked into the generated OIDC setup script; an explicit
+  // recovery override (or a hostile ledger reaching a library caller) must still be
+  // a canonical GUID before it reaches that shell sink.
+  const subscriptionId = opts.subscriptionId ?? opts.ledger?.subscriptionId;
+  if (subscriptionId !== undefined && !SUBSCRIPTION_ID_RE.test(subscriptionId)) {
+    throw new Error(`buildScaffold: unsafe subscription "${subscriptionId}" — refusing to generate.`);
+  }
   const needsPgPassword = planNeedsPgPassword(plan);
 
   const files: ScaffoldFile[] = [
@@ -84,7 +99,7 @@ export function buildScaffold(
     { path: ".azx/plan.json", content: JSON.stringify({ intent, plan }, null, 2) + "\n" },
     {
       path: "scripts/setup-azure-oidc.sh",
-      content: oidcSetupScript(rg, region, opts.ledger?.subscriptionId),
+      content: oidcSetupScript(rg, region, subscriptionId),
     },
     { path: ".gitignore", content: gitignore() },
   ];

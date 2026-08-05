@@ -28,7 +28,7 @@ import { loadGuardrails, parseGuardrails } from "./guardrails.js";
 import { loadBudget, normalizeBudget } from "./budget.js";
 import { plan as planIntent } from "./plan.js";
 import { generateBicep } from "./bicep.js";
-import { loadLedger, persistLedger, REGION_RE, RESOURCE_GROUP_RE } from "./ledger.js";
+import { loadLedger, persistLedger, REGION_RE, RESOURCE_GROUP_RE, SUBSCRIPTION_ID_RE } from "./ledger.js";
 import { dryRun } from "./run.js";
 import { diffPlans } from "./diff.js";
 import { buildScaffold, resourceGroupFor, type ScaffoldFile } from "./scaffold.js";
@@ -400,14 +400,38 @@ function loadLedgerWithRecovery(
   try {
     return { ledger: loadLedger(root), recovered: false };
   } catch (err) {
-    const hasOverride =
-      values["resource-group"] !== undefined ||
-      values.region !== undefined ||
-      values["subscription-id"] !== undefined;
-    if (!hasOverride) throw err;
-    process.stdout.write(
+    const rg = values["resource-group"];
+    const region = values.region;
+    const sub = values["subscription-id"];
+    const provided = [rg, region, sub].filter((v) => v !== undefined);
+    // No targeting asserted → fail loud exactly as before; never silently ignore a
+    // corrupt ledger.
+    if (provided.length === 0) throw err;
+    // A PARTIAL assertion is unsafe: the fields the operator did NOT specify would
+    // silently fall back to generated defaults / the current `az` account, which can
+    // diverge from where the (unreadable) ledger's live infra actually is — creating
+    // a second billable resource group or deploying into the wrong subscription. Demand
+    // the COMPLETE identity of the live target before we discard the ledger.
+    if (rg === undefined || region === undefined || sub === undefined) {
+      const missing = [
+        rg === undefined ? "--resource-group" : null,
+        region === undefined ? "--region" : null,
+        sub === undefined ? "--subscription-id" : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      throw new Error(
+        `${(err as Error).message}\n` +
+          `To recover from an unreadable ledger you must assert the COMPLETE live target: ` +
+          `--resource-group, --region, AND --subscription-id (missing: ${missing}). Otherwise azx ` +
+          `would silently default the rest and could target the wrong subscription or resource group.`,
+      );
+    }
+    // Warn on STDERR so `--json` stdout stays machine-parseable.
+    process.stderr.write(
       c.yellow(
-        "⚠ .azx/deploy.json is unreadable — ignoring it and using your explicit targeting.\n" +
+        "⚠ .azx/deploy.json is unreadable — ignoring it and using your explicit " +
+          "--resource-group / --region / --subscription-id.\n" +
           `  (${(err as Error).message})\n` +
           "  A fresh, valid ledger will be written on the next successful local deploy.\n\n",
       ),
@@ -441,8 +465,9 @@ function cmdLocalDeploy(
   }
 
   let ledger: DeployLedger | undefined;
+  let recovered = false;
   try {
-    ({ ledger } = loadLedgerWithRecovery(root, values, c));
+    ({ ledger, recovered } = loadLedgerWithRecovery(root, values, c));
   } catch (err) {
     process.stdout.write(banner(c, `deploy ${intent.app.name}`));
     process.stdout.write("\n" + c.red("✗ " + (err as Error).message) + "\n");
@@ -464,6 +489,15 @@ function cmdLocalDeploy(
     throw new Error(
       `--region "${region}" must be an Azure region short name (lowercase alphanumeric, ` +
         `e.g. "westus2"), not a display name.`,
+    );
+  }
+  // Validate the subscription override at PARSE time — before it reaches `az account
+  // set` (a shell sink on Windows) or the ledger. A GUID has no shell metacharacters,
+  // so this closes injection at the source AND guarantees a canonical, recordable id.
+  if (values["subscription-id"] !== undefined && !SUBSCRIPTION_ID_RE.test(values["subscription-id"])) {
+    throw new Error(
+      `--subscription-id "${values["subscription-id"]}" must be a subscription GUID ` +
+        `(e.g. 00000000-0000-0000-0000-000000000000), not a display name.`,
     );
   }
   // Pin the subscription: an explicit flag wins, else adopt the one the ledger
@@ -545,9 +579,16 @@ function cmdLocalDeploy(
     }
   }
 
+  // A successful apply whose ledger could NOT be written is a partial success: the
+  // resources ARE live but there's no continuity state. Automation must see a non-zero
+  // exit so it doesn't proceed assuming a clean, recorded deploy.
+  const applyLedgerFailed = !!(result.applied && ledgerWriteError);
+
   if (values.json) {
-    process.stdout.write(JSON.stringify({ ...result, ledgerPath, ledgerWriteError }, null, 2) + "\n");
-    return 0;
+    process.stdout.write(
+      JSON.stringify({ ...result, ledgerPath, ledgerWriteError, recovered }, null, 2) + "\n",
+    );
+    return applyLedgerFailed ? 1 : 0;
   }
 
   const mode = result.applied ? c.dim("(live · resources created)") : c.dim("(what-if only)");
@@ -576,7 +617,7 @@ function cmdLocalDeploy(
   } else {
     process.stdout.write("\n" + c.dim("What-if only — re-run with --yes to create the resources.\n"));
   }
-  return 0;
+  return applyLedgerFailed ? 1 : 0;
 }
 
 /**
@@ -614,10 +655,15 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
     outDir: values.out,
     // Normally `ship` targets via the adopted ledger (or plan defaults) and ignores
     // these flags. Only when RECOVERING from an unreadable ledger do we honor the
-    // operator's explicit targeting so the scaffold can still pin the live RG/region.
-    // buildScaffold re-validates both against its safe charsets before generating.
+    // operator's explicit targeting so the scaffold can still pin the live RG / region
+    // / subscription. loadLedgerWithRecovery has already guaranteed all three are
+    // present on recovery; buildScaffold re-validates each against its safe charset.
     ...(recovered
-      ? { resourceGroup: values["resource-group"], region: values.region }
+      ? {
+          resourceGroup: values["resource-group"],
+          region: values.region,
+          subscriptionId: values["subscription-id"],
+        }
       : {}),
     ledger,
   };
@@ -677,7 +723,7 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
   if (execute) {
     const result = runShip(intent, plan, bicep, shipOpts);
     if (values.json) {
-      process.stdout.write(JSON.stringify({ ...result, adoption }, null, 2) + "\n");
+      process.stdout.write(JSON.stringify({ ...result, adoption, recovered }, null, 2) + "\n");
       return 0;
     }
     process.stdout.write(banner(c, `ship ${intent.app.name}  ${c.dim("(live)")}`));

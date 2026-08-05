@@ -84,15 +84,30 @@ export function planNeedsPgPassword(plan: AzurePlan): boolean {
   return plan.resources.some((r) => r.type === "Microsoft.DBforPostgreSQL/flexibleServers");
 }
 
+/**
+ * Quote one argument for cmd.exe: wrap in double quotes and double any embedded
+ * quote. Inside double quotes cmd.exe treats space and the metacharacters
+ * `& | < > ^ ( )` as literal, so this is the safe way to pass a path that may
+ * contain spaces (e.g. a `%TEMP%` under `C:\Users\First Last\...`) or an arg with
+ * a metacharacter without word-splitting or command injection. We never rely on
+ * Node's `shell:true` arg joining, which sets windowsVerbatimArguments (no quoting).
+ */
+export function winQuoteArg(arg: string): string {
+  return `"${arg.replace(/"/g, '""')}"`;
+}
+
 /** Default runner: invoke the real `az` CLI, capturing output. */
 export function defaultAzRunner(): AzRunner {
   // On Windows the Azure CLI is a batch shim (`az.cmd`); recent Node refuses to
-  // spawn `.cmd`/`.bat` without a shell (EINVAL), so use shell:true there. On
-  // POSIX we spawn `az` directly (shell:false) to avoid quoting surprises.
+  // spawn `.cmd`/`.bat` without a shell (EINVAL), so we must go through cmd.exe.
+  // But shell:true with an args ARRAY sets windowsVerbatimArguments and Node does
+  // NOT quote — a temp path with a space or a metachar in an arg would break the
+  // command or inject. Build one explicitly quoted command line instead. On POSIX
+  // we spawn `az` directly (shell:false) to avoid quoting surprises entirely.
   const isWin = process.platform === "win32";
   return (args) => {
     const res = isWin
-      ? spawnSync("az", args, { encoding: "utf8", shell: true })
+      ? spawnSync(["az", ...args].map(winQuoteArg).join(" "), { encoding: "utf8", shell: true })
       : spawnSync("az", args, { encoding: "utf8", shell: false });
     if (res.error) {
       const e = res.error as NodeJS.ErrnoException;
@@ -196,11 +211,18 @@ export function runLocalDeploy(
     // apply would succeed but `persistLedger` would then reject the non-canonical id
     // AFTER resources are live — stranding a billable deploy behind an unwritable
     // ledger. Throwing here (before `az group create`) means no resources exist yet.
-    if (subscriptionId !== undefined && !SUBSCRIPTION_ID_RE.test(subscriptionId)) {
+    // Require a canonical GUID UNCONDITIONALLY before any resource is created. A
+    // non-GUID value (display name left over from `az account set`) OR an `undefined`
+    // one (malformed `az account show` JSON, or output missing `id`) must both stop
+    // us here: proceeding would apply against whatever account is current and then
+    // `persistLedger` would reject the id AFTER resources are live — stranding a
+    // billable deploy behind an unwritable ledger. Throwing before `az group create`
+    // means no resources exist yet.
+    if (subscriptionId === undefined || !SUBSCRIPTION_ID_RE.test(subscriptionId)) {
       throw new Error(
-        `could not resolve subscription ${JSON.stringify(opts.subscriptionId ?? subscriptionId)} ` +
-          `to a canonical GUID (az returned ${JSON.stringify(subscriptionId)}). Refusing to deploy ` +
-          `with a subscription azx can't record in its deploy ledger — pass the subscription GUID explicitly.`,
+        `could not resolve the active Azure subscription to a canonical GUID ` +
+          `(az returned ${JSON.stringify(subscriptionId)}). Refusing to deploy with a subscription ` +
+          `azx can't record in its deploy ledger — run \`az account set\` or pass --subscription-id <guid>.`,
       );
     }
 

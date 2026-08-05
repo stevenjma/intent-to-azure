@@ -10,12 +10,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { resolveRepo } from "../src/index.js";
-import { runLocalDeploy, planNeedsPgPassword, DeployError, type AzRunner } from "../src/az-deploy.js";
+import { runLocalDeploy, planNeedsPgPassword, DeployError, winQuoteArg, type AzRunner } from "../src/az-deploy.js";
 import { buildScaffold } from "../src/scaffold.js";
 
 const FIXED = new Date("2024-01-01T00:00:00.000Z");
@@ -224,4 +225,42 @@ test("a subscription that can't be canonicalized fails BEFORE any resource is cr
     !calls.some((a) => a[0] === "deployment" && a[2] === "create"),
     "must not deploy",
   );
+});
+
+test("an UNDEFINED subscription (malformed `az account show`) fails BEFORE any resource is created", () => {
+  // No --subscription-id, and `az account show -o json` returns valid JSON with NO `id`
+  // (or unparseable output). subscriptionId stays undefined; deploying would target
+  // whatever account is current and then persistLedger would reject the ledger AFTER
+  // resources are live. The gate must stop us before `az group create`.
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz({ "account show -o": { status: 0, stdout: "{}" } });
+  assert.throws(
+    () => runLocalDeploy(plan, { ...pgOpts, apply: true, now: () => FIXED }, runner),
+    /canonical GUID|Refusing to deploy/,
+  );
+  assert.ok(!calls.some((a) => a[0] === "group" && a[1] === "create"), "must not create the RG");
+  assert.ok(!calls.some((a) => a[0] === "deployment" && a[2] === "create"), "must not deploy");
+});
+
+test("winQuoteArg wraps args in double quotes and doubles embedded quotes", () => {
+  assert.equal(winQuoteArg("plain"), '"plain"');
+  assert.equal(winQuoteArg("a b"), '"a b"'); // spaces (e.g. a %TEMP% path) stay one token
+  assert.equal(winQuoteArg("R&D"), '"R&D"'); // cmd.exe metachars are literal inside quotes
+  assert.equal(winQuoteArg('x"y'), '"x""y"');
+});
+
+test("Windows: a spaced path and a metachar arg survive cmd.exe as single literal tokens", (t) => {
+  // Empirical proof of the runner's quoting on the real shell: mirror defaultAzRunner's
+  // cmd.exe path (shell:true with a pre-quoted command line) using a harmless echo
+  // program, and confirm both a space-containing arg and one with `&` round-trip intact.
+  if (process.platform !== "win32") {
+    t.skip("cmd.exe quoting is Windows-only");
+    return;
+  }
+  const script = "process.stdout.write(process.argv.slice(1).join('\\u0000'))";
+  const args = ["C:\\Users\\First Last\\Temp\\main.bicep", "R&D | Sub"];
+  const cmdline = [process.execPath, "-e", script, ...args].map(winQuoteArg).join(" ");
+  const r = spawnSync(cmdline, { encoding: "utf8", shell: true });
+  assert.equal(r.status, 0, `spawn failed: ${r.stderr}`);
+  assert.deepEqual((r.stdout ?? "").split("\u0000"), args, "args must not word-split or inject");
 });
