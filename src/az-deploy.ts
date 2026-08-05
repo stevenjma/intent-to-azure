@@ -23,6 +23,7 @@ import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 
 import type { AzurePlan, DeployLedger } from "./types.js";
+import { SUBSCRIPTION_ID_RE } from "./ledger.js";
 
 /** Result of one `az` invocation. */
 export interface AzResult {
@@ -187,6 +188,20 @@ export function runLocalDeploy(
         if (id) subscriptionId = id;
       }
       steps.push(`selected subscription ${subscriptionId ?? opts.subscriptionId}`);
+    }
+
+    // 2b. Canonicalization gate — FAIL BEFORE creating any resource. `az account set`
+    // and `account show -o json` can leave `subscriptionId` as a display name (if the
+    // re-query above failed open) or an otherwise non-GUID value. If we proceeded, the
+    // apply would succeed but `persistLedger` would then reject the non-canonical id
+    // AFTER resources are live — stranding a billable deploy behind an unwritable
+    // ledger. Throwing here (before `az group create`) means no resources exist yet.
+    if (subscriptionId !== undefined && !SUBSCRIPTION_ID_RE.test(subscriptionId)) {
+      throw new Error(
+        `could not resolve subscription ${JSON.stringify(opts.subscriptionId ?? subscriptionId)} ` +
+          `to a canonical GUID (az returned ${JSON.stringify(subscriptionId)}). Refusing to deploy ` +
+          `with a subscription azx can't record in its deploy ledger — pass the subscription GUID explicitly.`,
+      );
     }
 
     // 3. Ensure the resource group.

@@ -66,7 +66,14 @@ export function normalizeBudget(raw: Record<string, unknown>): BudgetContext {
       ? explicit
       : classifyOffer(budget.offerId);
 
-  budget.currency = typeof raw.currency === "string" ? raw.currency : "USD";
+  // `currency` comes from the untrusted app repo's `.azx/subscription.json` and is
+  // interpolated into a single-line Bicep `//` comment (bicep.ts), the generated
+  // README, and the plan summary. A newline/backtick would break out of the comment
+  // into executable Bicep, so accept only a short currency-code-shaped token.
+  budget.currency =
+    typeof raw.currency === "string" && /^[A-Za-z0-9$€£¥.]{1,8}$/.test(raw.currency)
+      ? raw.currency
+      : "USD";
   return budget;
 }
 

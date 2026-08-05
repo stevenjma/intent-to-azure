@@ -202,3 +202,26 @@ test("a subscription NAME override is canonicalized to a GUID in the ledger", ()
   // The persisted ledger is one the strict loader would accept.
   assert.doesNotThrow(() => buildScaffold(build("django-notes").intent, plan, "// b", { ledger: res.ledger! }));
 });
+
+test("a subscription that can't be canonicalized fails BEFORE any resource is created", () => {
+  // If `az account set` accepts a name but the id re-query fails open (nonzero/empty),
+  // subscriptionId would stay a non-GUID name. We must refuse before `az group create`
+  // so no billable resources exist behind an unwritable ledger.
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz({ "account show --query": { status: 1, stdout: "" } });
+  assert.throws(
+    () =>
+      runLocalDeploy(
+        plan,
+        { ...pgOpts, subscriptionId: "My Subscription Name", apply: true, now: () => FIXED },
+        runner,
+      ),
+    /canonical GUID|Refusing to deploy/,
+  );
+  // Crucially: it failed before ensuring the resource group or deploying.
+  assert.ok(!calls.some((a) => a[0] === "group" && a[1] === "create"), "must not create the RG");
+  assert.ok(
+    !calls.some((a) => a[0] === "deployment" && a[2] === "create"),
+    "must not deploy",
+  );
+});

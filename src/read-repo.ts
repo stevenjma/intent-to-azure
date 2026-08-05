@@ -233,7 +233,19 @@ function detectNode(idx: RepoIndex, app: AppInfo, push: (s: Signal) => void): vo
   }
 
   app.runtime ??= "node";
-  if (typeof pkg.name === "string" && pkg.name.trim()) app.name = pkg.name.trim();
+  if (typeof pkg.name === "string") {
+    // `pkg.name` is untrusted and flows verbatim into the generated README title
+    // (which `ship --create-repo` commits + pushes) and terminal banners. `.trim()`
+    // alone leaves embedded CR/LF, which let a hostile package.json inject Markdown
+    // headings/fenced blocks above azx's own attribution. Collapse control chars +
+    // whitespace to a single safe display line before adopting it.
+    const cleaned = pkg.name
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80);
+    if (cleaned) app.name = cleaned;
+  }
 
   const deps = {
     ...(pkg.dependencies as Record<string, string> | undefined),
