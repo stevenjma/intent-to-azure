@@ -43,6 +43,8 @@ export type { MapContext } from "./azure-map.js";
 
 export { generateBicep } from "./bicep.js";
 
+export { generateArmTemplate } from "./arm-template.js";
+
 export { diffPlans } from "./diff.js";
 
 export { DryRunDeployer, dryRun } from "./run.js";

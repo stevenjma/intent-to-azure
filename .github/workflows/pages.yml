@@ -1,0 +1,64 @@
+name: Deploy SPA to GitHub Pages
+
+# Builds the browser engine (tsc + scripts/build-web.mjs) and publishes web/ to Pages.
+# Enable Pages for this repo (Settings → Pages → Source: GitHub Actions) first.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "web/**"
+      - "scripts/build-web.mjs"
+      - "package.json"
+      - "tsconfig.json"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build browser engine assets
+        run: npm run build:web
+
+      - name: Provide placeholder config if none committed
+        run: |
+          if [ ! -f web/config.js ]; then
+            cp web/config.example.js web/config.js
+            echo "No web/config.js committed — using placeholders (SPA shows the setup banner)."
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

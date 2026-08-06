@@ -23,3 +23,8 @@ coverage/
 
 # Local E2E runner scratch (bicep/plan/what-if artifacts from test/e2e/local.mjs)
 test/e2e/.local/
+
+# SPA engine assets — built from dist/ by scripts/build-web.mjs (npm run build:web)
+web/engine/
+# SPA local config with real client IDs (ship web/config.example.js instead)
+web/config.js

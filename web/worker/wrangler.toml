@@ -1,0 +1,11 @@
+name = "azx-gh-oauth"
+main = "github-oauth-worker.js"
+compatibility_date = "2024-11-01"
+
+# Public, non-secret values. Set the origin to your Pages URL origin.
+[vars]
+ALLOWED_ORIGIN = "https://YOUR_USER.github.io"
+GITHUB_CLIENT_ID = "YOUR_GITHUB_OAUTH_CLIENT_ID"
+
+# GITHUB_CLIENT_SECRET is a SECRET — do NOT put it here. Set it with:
+#   wrangler secret put GITHUB_CLIENT_SECRET
