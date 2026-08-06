@@ -14,6 +14,8 @@
 
 export * from "./types.js";
 
+export { scanFileMap } from "./scan-core.js";
+
 export { readRepo } from "./read-repo.js";
 export type { RepoScan } from "./read-repo.js";
 
