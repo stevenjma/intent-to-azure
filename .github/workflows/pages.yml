@@ -41,11 +41,29 @@ jobs:
       - name: Build browser engine assets
         run: npm run build:web
 
-      - name: Provide placeholder config if none committed
+      - name: Generate web/config.js from repo Variables
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT: ${{ vars.AZURE_TENANT }}
+          GH_OAUTH_CLIENT_ID: ${{ vars.GH_OAUTH_CLIENT_ID }}
+          GH_WORKER_URL: ${{ vars.GH_WORKER_URL }}
         run: |
-          if [ ! -f web/config.js ]; then
+          # All four are PUBLIC identifiers (no secrets). Set them under
+          # Settings → Secrets and variables → Actions → Variables.
+          if [ -z "$AZURE_CLIENT_ID" ]; then
+            echo "AZURE_CLIENT_ID variable unset — publishing placeholder config (setup banner)."
             cp web/config.example.js web/config.js
-            echo "No web/config.js committed — using placeholders (SPA shows the setup banner)."
+          else
+            cat > web/config.js <<EOF
+          window.AZX_CONFIG = {
+            azureClientId: "${AZURE_CLIENT_ID}",
+            azureTenant: "${AZURE_TENANT:-common}",
+            githubClientId: "${GH_OAUTH_CLIENT_ID}",
+            githubWorkerUrl: "${GH_WORKER_URL}",
+            githubScopes: "repo read:user",
+          };
+          EOF
+            echo "Generated web/config.js from repo Variables."
           fi
 
       - name: Upload Pages artifact
