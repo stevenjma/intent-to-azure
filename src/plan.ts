@@ -20,7 +20,7 @@ import {
   buildWebCompute,
   type MapContext,
 } from "./azure-map.js";
-import { describeBudget, prefersEconomy } from "./budget.js";
+import { describeBudget, prefersEconomy } from "./budget-core.js";
 import type {
   AppIntent,
   AzurePlan,
@@ -36,6 +36,11 @@ import type {
 
 /** One documented MVP default region when no guardrail pins one. */
 export const DEFAULT_REGION = "eastus2";
+
+/** True when the plan provisions a PostgreSQL flexible server (needs a password). */
+export function planNeedsPgPassword(plan: AzurePlan): boolean {
+  return plan.resources.some((r) => r.type === "Microsoft.DBforPostgreSQL/flexibleServers");
+}
 
 export interface PlanOptions extends ClockOptions {
   guardrails?: Guardrails;

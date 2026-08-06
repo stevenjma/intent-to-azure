@@ -11,8 +11,8 @@
  */
 
 import type { AppIntent, AzurePlan, DeployLedger } from "./types.js";
-import { planNeedsPgPassword } from "./az-deploy.js";
-import { isDeployLedger, REGION_RE, RESOURCE_GROUP_RE, SUBSCRIPTION_ID_RE } from "./ledger.js";
+import { planNeedsPgPassword } from "./plan.js";
+import { isDeployLedger, REGION_RE, RESOURCE_GROUP_RE, SUBSCRIPTION_ID_RE } from "./ledger-core.js";
 
 /** A single file in the generated repo tree (POSIX-style relative path). */
 export interface ScaffoldFile {

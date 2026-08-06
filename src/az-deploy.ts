@@ -24,6 +24,9 @@ import { createHash } from "node:crypto";
 
 import type { AzurePlan, DeployLedger } from "./types.js";
 import { SUBSCRIPTION_ID_RE } from "./ledger.js";
+import { planNeedsPgPassword } from "./plan.js";
+
+export { planNeedsPgPassword } from "./plan.js";
 
 /** Result of one `az` invocation. */
 export interface AzResult {
@@ -77,11 +80,6 @@ export interface LocalDeployResult {
   whatIf?: string;
   /** The continuity ledger — present only after a successful apply. */
   ledger?: DeployLedger;
-}
-
-/** True when the plan provisions a PostgreSQL flexible server (needs a password). */
-export function planNeedsPgPassword(plan: AzurePlan): boolean {
-  return plan.resources.some((r) => r.type === "Microsoft.DBforPostgreSQL/flexibleServers");
 }
 
 /**
