@@ -5,7 +5,7 @@ compatibility_date = "2024-11-01"
 # Public, non-secret values. Set the origin to your Pages URL origin.
 [vars]
 ALLOWED_ORIGIN = "https://stevenjma.github.io"
-GITHUB_CLIENT_ID = "YOUR_GITHUB_OAUTH_CLIENT_ID"
+GITHUB_CLIENT_ID = "Ov23ctRkt4p21yKIVytT"
 
 # GITHUB_CLIENT_SECRET is a SECRET — do NOT put it here. In the Cloudflare
 # dashboard set it under the Worker's Settings → Variables and Secrets as an
