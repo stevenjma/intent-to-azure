@@ -16,9 +16,11 @@
  */
 
 import { parseArgs } from "node:util";
-import { readFileSync, writeFileSync, readSync } from "node:fs";
+import { readFileSync, writeFileSync, readSync, mkdirSync, mkdtempSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { basename, resolve } from "node:path";
+import { basename, resolve, join } from "node:path";
+import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 
 import { readRepo, type RepoScan } from "./read-repo.js";
 import { extractIntent } from "./extract-intent.js";
@@ -26,15 +28,28 @@ import { loadGuardrails, parseGuardrails } from "./guardrails.js";
 import { loadBudget, normalizeBudget } from "./budget.js";
 import { plan as planIntent } from "./plan.js";
 import { generateBicep } from "./bicep.js";
+import { loadLedger, persistLedger, REGION_RE, RESOURCE_GROUP_RE, SUBSCRIPTION_ID_RE } from "./ledger.js";
 import { dryRun } from "./run.js";
 import { diffPlans } from "./diff.js";
-import type { AppIntent, AzurePlan, ChangeAction, Confirmation, Guardrails, BudgetContext, Confidence, PlanDiff } from "./types.js";
+import { buildScaffold, resourceGroupFor, type ScaffoldFile } from "./scaffold.js";
+import { shipSteps, runShip, writeScaffoldFiles, assertEmptyOutDir, type ShipStep } from "./ship.js";
+import { runLocalDeploy, DeployError } from "./az-deploy.js";
+import type { AppIntent, AzurePlan, ChangeAction, Confirmation, Guardrails, BudgetContext, Confidence, PlanDiff, DeployLedger } from "./types.js";
 
 interface Values {
   json?: boolean;
   guardrails?: string;
   subscription?: string;
   out?: string;
+  scaffold?: string;
+  "create-repo"?: string;
+  deploy?: boolean;
+  private?: boolean;
+  "local-deploy"?: boolean;
+  "resource-group"?: string;
+  region?: string;
+  "pg-password"?: string;
+  "subscription-id"?: string;
   against?: string;
   yes?: boolean;
   "no-bicep"?: boolean;
@@ -54,6 +69,15 @@ function main(argv: string[]): number {
         guardrails: { type: "string" },
         subscription: { type: "string" },
         out: { type: "string" },
+        scaffold: { type: "string" },
+        "create-repo": { type: "string" },
+        deploy: { type: "boolean" },
+        private: { type: "boolean" },
+        "local-deploy": { type: "boolean" },
+        "resource-group": { type: "string" },
+        region: { type: "string" },
+        "pg-password": { type: "string" },
+        "subscription-id": { type: "string" },
         against: { type: "string" },
         yes: { type: "boolean" },
         "no-bicep": { type: "boolean" },
@@ -98,6 +122,8 @@ function main(argv: string[]): number {
         return cmdWhatIf(repoArg, values, color);
       case "up":
         return cmdUp(repoArg, values, color);
+      case "ship":
+        return cmdShip(repoArg, values, color);
       case "schema":
         return cmdSchema(values);
       default:
@@ -161,8 +187,20 @@ function cmdPlan(repoArg: string, values: Values, c: Color): number {
 
   if (values.out) writeFileSync(resolve(values.out), bicep);
 
+  // --scaffold writes the ENTIRE deployable repo tree (Bicep + CI/CD pipeline)
+  // to disk as inert code — the "all the code, not tied to a live repo" mode.
+  let scaffoldFiles: ScaffoldFile[] | undefined;
+  if (values.scaffold) {
+    const target = resolve(values.scaffold);
+    assertEmptyOutDir(target);
+    scaffoldFiles = buildScaffold(intent, plan, bicep, { ledger: loadLedger(root) });
+    writeScaffoldFiles(target, scaffoldFiles);
+  }
+
   if (values.json) {
-    process.stdout.write(JSON.stringify({ intent, plan, bicep }, null, 2) + "\n");
+    const payload: Record<string, unknown> = { intent, plan, bicep };
+    if (scaffoldFiles) payload.scaffold = scaffoldFiles;
+    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
     return 0;
   }
 
@@ -179,6 +217,14 @@ function cmdPlan(repoArg: string, values: Values, c: Color): number {
     process.stdout.write(c.dim(hr()) + "\n" + bicep + c.dim(hr()) + "\n");
   }
   if (values.out) process.stdout.write(c.dim(`\nBicep written to ${resolve(values.out)}\n`));
+  if (scaffoldFiles) {
+    process.stdout.write(
+      c.dim(`\nScaffold (${scaffoldFiles.length} files) written to ${resolve(values.scaffold!)}\n`),
+    );
+    process.stdout.write(
+      c.dim(`  Ship it live with: azx ship ${basename(root)} --create-repo <owner/name>\n`),
+    );
+  }
   return 0;
 }
 
@@ -311,7 +357,14 @@ function promptYesNo(prompt: string): boolean {
 
 function cmdUp(repoArg: string, values: Values, c: Color): number {
   const root = resolve(repoArg);
-  const { plan, bicep } = buildAll(root, values);
+  const { intent, plan, bicep } = buildAll(root, values);
+
+  // --local-deploy: the imperative "inner loop" — really create Azure resources
+  // via `az` (what-if gated). Everything else stays the offline dry-run stub.
+  if (values["local-deploy"]) {
+    return cmdLocalDeploy(root, intent, plan, bicep, values, c);
+  }
+
   const result = dryRun(plan, bicep);
   if (values.json) {
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
@@ -322,7 +375,423 @@ function cmdUp(repoArg: string, values: Values, c: Color): number {
     const line = step.startsWith("  ") ? c.dim(step) : step;
     process.stdout.write(line + "\n");
   }
+  process.stdout.write(
+    c.dim("\nTip: `azx up <path> --local-deploy` really deploys to Azure (needs `az login`).\n"),
+  );
   return result.blocked ? 1 : 0;
+}
+
+/**
+ * Load the deploy ledger, but let EXPLICIT targeting flags recover from an
+ * *unreadable* one. A corrupt/truncated ledger — or one written by a pre-hardening
+ * azx — otherwise fails loud with only "fix or delete it", and deleting it destroys
+ * the sole record of live, billable infra. When the operator supplies explicit
+ * targeting (`--resource-group` / `--region` / `--subscription-id`), we treat the
+ * bad ledger as absent, warn loudly, and proceed with the targeting they asserted;
+ * the next successful local deploy overwrites it with a fresh, valid ledger. An
+ * ABSENT ledger (undefined) is a normal greenfield — only a THROW is recoverable,
+ * and only with an explicit override so we never silently ignore a corrupt record.
+ */
+function loadLedgerWithRecovery(
+  root: string,
+  values: Values,
+  c: Color,
+): { ledger: DeployLedger | undefined; recovered: boolean } {
+  try {
+    return { ledger: loadLedger(root), recovered: false };
+  } catch (err) {
+    const rg = values["resource-group"];
+    const region = values.region;
+    const sub = values["subscription-id"];
+    const provided = [rg, region, sub].filter((v) => v !== undefined);
+    // No targeting asserted → fail loud exactly as before; never silently ignore a
+    // corrupt ledger.
+    if (provided.length === 0) throw err;
+    // A PARTIAL assertion is unsafe: the fields the operator did NOT specify would
+    // silently fall back to generated defaults / the current `az` account, which can
+    // diverge from where the (unreadable) ledger's live infra actually is — creating
+    // a second billable resource group or deploying into the wrong subscription. Demand
+    // the COMPLETE identity of the live target before we discard the ledger.
+    if (rg === undefined || region === undefined || sub === undefined) {
+      const missing = [
+        rg === undefined ? "--resource-group" : null,
+        region === undefined ? "--region" : null,
+        sub === undefined ? "--subscription-id" : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      throw new Error(
+        `${(err as Error).message}\n` +
+          `To recover from an unreadable ledger you must assert the COMPLETE live target: ` +
+          `--resource-group, --region, AND --subscription-id (missing: ${missing}). Otherwise azx ` +
+          `would silently default the rest and could target the wrong subscription or resource group.`,
+      );
+    }
+    // Warn on STDERR so `--json` stdout stays machine-parseable.
+    process.stderr.write(
+      c.yellow(
+        "⚠ .azx/deploy.json is unreadable — ignoring it and using your explicit " +
+          "--resource-group / --region / --subscription-id.\n" +
+          `  (${(err as Error).message})\n` +
+          "  A fresh, valid ledger will be written on the next successful local deploy.\n\n",
+      ),
+    );
+    return { ledger: undefined, recovered: true };
+  }
+}
+
+/**
+ * `azx up <path> --local-deploy [--yes] [--resource-group r] [--region x]
+ *                               [--pg-password p] [--subscription-id id]`
+ *
+ * The imperative inner loop: `az` really creates the resources. What-if is always
+ * previewed first; the real apply only happens with --yes. On success it writes
+ * `.azx/deploy.json` — the continuity ledger `azx ship` adopts to codify this
+ * same deployment into a reviewed CI/CD pipeline.
+ */
+function cmdLocalDeploy(
+  root: string,
+  intent: AppIntent,
+  plan: AzurePlan,
+  bicep: string,
+  values: Values,
+  c: Color,
+): number {
+  if (plan.budget.blocked) {
+    process.stdout.write(banner(c, `deploy ${intent.app.name}`));
+    process.stdout.write(c.red("\n✗ Blocked by budget guardrail — refusing to deploy.\n"));
+    for (const w of plan.budget.warnings) process.stdout.write("  " + c.yellow("⚠ " + w) + "\n");
+    return 1;
+  }
+
+  let ledger: DeployLedger | undefined;
+  let recovered = false;
+  try {
+    ({ ledger, recovered } = loadLedgerWithRecovery(root, values, c));
+  } catch (err) {
+    process.stdout.write(banner(c, `deploy ${intent.app.name}`));
+    process.stdout.write("\n" + c.red("✗ " + (err as Error).message) + "\n");
+    return 1;
+  }
+  const rg = values["resource-group"] ?? resourceGroupFor(intent, { ledger });
+  const region = values.region ?? ledger?.region ?? plan.region;
+  // Reject un-persistable override targeting BEFORE we deploy. `az` accepts region
+  // display names ("West US 2") and non-ASCII RG names, but the ledger we'd write
+  // afterward must be canonical or the next `ship`/re-run can't read it — stranding a
+  // live, billable deploy. Fail fast with actionable guidance instead of after apply.
+  if (values["resource-group"] !== undefined && !RESOURCE_GROUP_RE.test(rg)) {
+    throw new Error(
+      `--resource-group "${rg}" has characters azx can't record in its deploy ledger. ` +
+        `Use letters, digits, and . _ ( ) - only.`,
+    );
+  }
+  if (values.region !== undefined && !REGION_RE.test(region)) {
+    throw new Error(
+      `--region "${region}" must be an Azure region short name (lowercase alphanumeric, ` +
+        `e.g. "westus2"), not a display name.`,
+    );
+  }
+  // Validate the subscription override at PARSE time — before it reaches `az account
+  // set` (a shell sink on Windows) or the ledger. A GUID has no shell metacharacters,
+  // so this closes injection at the source AND guarantees a canonical, recordable id.
+  if (values["subscription-id"] !== undefined && !SUBSCRIPTION_ID_RE.test(values["subscription-id"])) {
+    throw new Error(
+      `--subscription-id "${values["subscription-id"]}" must be a subscription GUID ` +
+        `(e.g. 00000000-0000-0000-0000-000000000000), not a display name.`,
+    );
+  }
+  // Pin the subscription: an explicit flag wins, else adopt the one the ledger
+  // recorded so a re-run can't silently target whatever `az` account is current
+  // (which would duplicate billable infra under the same RG name elsewhere).
+  const subscriptionId = values["subscription-id"] ?? ledger?.subscriptionId;
+  const apply = !!values.yes;
+
+  // The `az deployment` calls need main.bicep on disk. Write it to a throwaway
+  // temp dir so we never pollute the user's repo; only the ledger lands in .azx/.
+  const bicepPath = join(mkdtempSync(join(tmpdir(), "azx-deploy-")), "main.bicep");
+  writeFileSync(bicepPath, bicep);
+
+  let result;
+  try {
+    result = runLocalDeploy(plan, {
+      bicepPath,
+      resourceGroup: rg,
+      region,
+      subscriptionId,
+      pgPassword: values["pg-password"],
+      apply,
+    });
+  } catch (err) {
+    // A partial failure still created a real (billable) resource group — persist
+    // its ledger so `ship` and the user can reconcile or tear it down. If persisting
+    // ITSELF fails (disk full, permissions, rename), that must NOT swallow the far
+    // more important "you have live resources — here's how to tear them down" guidance.
+    let partialPath: string | undefined;
+    let ledgerWriteError: string | undefined;
+    if (err instanceof DeployError && err.ledger) {
+      try {
+        partialPath = persistLedger(root, err.ledger);
+      } catch (writeErr) {
+        ledgerWriteError = (writeErr as Error).message;
+      }
+    }
+    const hasLiveResources = err instanceof DeployError && !!err.ledger;
+    if (values.json) {
+      process.stdout.write(
+        JSON.stringify(
+          { error: (err as Error).message, ledgerPath: partialPath, ledgerWriteError },
+          null,
+          2,
+        ) + "\n",
+      );
+    } else {
+      process.stdout.write(banner(c, `deploy ${intent.app.name}`));
+      process.stdout.write("\n" + c.red("✗ " + (err as Error).message) + "\n");
+      if (hasLiveResources) {
+        process.stdout.write(
+          c.yellow(
+            `  ⚠ Partial deploy — resource group ${rg} may hold live resources.\n`,
+          ),
+        );
+        if (partialPath) {
+          process.stdout.write(c.dim(`  Ledger: ${partialPath}\n`));
+        } else if (ledgerWriteError) {
+          process.stdout.write(
+            c.yellow(`  ⚠ Could not write the reconciliation ledger: ${ledgerWriteError}\n`),
+          );
+        }
+        process.stdout.write(c.dim(`  Tear it down with: az group delete -n ${rg} --yes --no-wait\n`));
+      }
+    }
+    return 1;
+  }
+
+  // Persist the ledger on a real apply so `ship` can adopt this deployment. A write
+  // failure here can't undo the deploy — surface it loudly (the resources ARE live)
+  // rather than crashing after a successful apply.
+  let ledgerPath: string | undefined;
+  let ledgerWriteError: string | undefined;
+  if (result.ledger) {
+    try {
+      ledgerPath = persistLedger(root, result.ledger);
+    } catch (writeErr) {
+      ledgerWriteError = (writeErr as Error).message;
+    }
+  }
+
+  // A successful apply whose ledger could NOT be written is a partial success: the
+  // resources ARE live but there's no continuity state. Automation must see a non-zero
+  // exit so it doesn't proceed assuming a clean, recorded deploy.
+  const applyLedgerFailed = !!(result.applied && ledgerWriteError);
+
+  if (values.json) {
+    process.stdout.write(
+      JSON.stringify({ ...result, ledgerPath, ledgerWriteError, recovered }, null, 2) + "\n",
+    );
+    return applyLedgerFailed ? 1 : 0;
+  }
+
+  const mode = result.applied ? c.dim("(live · resources created)") : c.dim("(what-if only)");
+  process.stdout.write(banner(c, `deploy ${intent.app.name}  ${mode}`));
+  process.stdout.write(c.dim(`  resource group ${rg} · region ${region}\n\n`));
+  for (const step of result.steps) {
+    process.stdout.write("  " + c.green("✓") + " " + step + "\n");
+  }
+  if (result.applied) {
+    process.stdout.write("\n" + c.bold("Deployed.") + " Real Azure resources are live.\n");
+    if (ledgerPath) {
+      process.stdout.write(c.dim(`  ledger written to ${ledgerPath}\n`));
+    } else if (ledgerWriteError) {
+      process.stdout.write(
+        c.yellow(
+          `  ⚠ Resources are live but the ledger could NOT be written: ${ledgerWriteError}\n`,
+        ) +
+          c.dim(
+            `  Record resource group ${rg} (region ${region}) yourself so you can reconcile or tear it down.\n`,
+          ),
+      );
+    }
+    process.stdout.write(
+      c.dim(`  Harden it into a reviewed pipeline: azx ship ${basename(root)} --create-repo <owner/name>\n`),
+    );
+  } else {
+    process.stdout.write("\n" + c.dim("What-if only — re-run with --yes to create the resources.\n"));
+  }
+  return applyLedgerFailed ? 1 : 0;
+}
+
+/**
+ * `azx ship <path> [--create-repo owner/name] [--deploy] [--private] [--out dir]`
+ *
+ * The "source repo + CI/CD" mode. Builds the full scaffold (Bicep + deploy
+ * pipeline), then:
+ *   - default (no --create-repo): DRY RUN. Writes the scaffold to --out (or a
+ *     repo-named dir) and prints the exact git/gh commands it *would* run.
+ *   - --create-repo owner/name: creates + pushes a real GitHub repo via `gh`;
+ *     with --deploy, also triggers the workflow so the pipeline does the real
+ *     Azure deploy (via OIDC). azx itself still makes zero Azure calls.
+ */
+function cmdShip(repoArg: string, values: Values, c: Color): number {
+  const root = resolve(repoArg);
+  const { intent, plan, bicep } = buildAll(root, values);
+
+  let ledger: DeployLedger | undefined;
+  let recovered = false;
+  try {
+    ({ ledger, recovered } = loadLedgerWithRecovery(root, values, c));
+  } catch (err) {
+    if (values.json) {
+      process.stdout.write(JSON.stringify({ error: (err as Error).message }, null, 2) + "\n");
+    } else {
+      process.stdout.write(banner(c, `ship ${intent.app.name}`));
+      process.stdout.write("\n" + c.red("✗ " + (err as Error).message) + "\n");
+    }
+    return 1;
+  }
+  // When the ledger is valid we target via it (or plan defaults) and ignore any
+  // explicit targeting flags. Tell the operator so a silently-ignored
+  // --resource-group/--region/--subscription-id doesn't become a support ticket.
+  if (!recovered && !values.json) {
+    const ignored = (["resource-group", "region", "subscription-id"] as const).filter(
+      (f) => values[f] !== undefined,
+    );
+    if (ignored.length > 0) {
+      process.stderr.write(
+        `⚠ ignoring ${ignored.map((f) => "--" + f).join(", ")} — the adopted ledger targets the deployment.\n`,
+      );
+    }
+  }
+
+  const shipOpts = {
+    repo: values["create-repo"],
+    visibility: (values.private === false ? "public" : "private") as "public" | "private",
+    deploy: values.deploy,
+    outDir: values.out,
+    // Normally `ship` targets via the adopted ledger (or plan defaults) and ignores
+    // these flags. Only when RECOVERING from an unreadable ledger do we honor the
+    // operator's explicit targeting so the scaffold can still pin the live RG / region
+    // / subscription. loadLedgerWithRecovery has already guaranteed all three are
+    // present on recovery; buildScaffold re-validates each against its safe charset.
+    ...(recovered
+      ? {
+          resourceGroup: values["resource-group"],
+          region: values.region,
+          subscriptionId: values["subscription-id"],
+        }
+      : {}),
+    ledger,
+  };
+
+  // Verify the adoption is real: if the freshly generated template no longer
+  // matches what local deploy applied, the pipeline's first what-if will NOT be a
+  // no-op. Compute this as structured data so --json / CI consumers can't miss it,
+  // and warn loudly in human mode rather than let the "clean handoff" claim break.
+  let drift: { expectedHash: string; actualHash: string } | undefined;
+  if (ledger?.templateHash) {
+    const currentHash = createHash("sha256").update(bicep).digest("hex");
+    if (currentHash !== ledger.templateHash) {
+      drift = { expectedHash: ledger.templateHash, actualHash: currentHash };
+    }
+  }
+  const adoption = ledger
+    ? { drift: !!drift, partial: !!ledger.partial, ...(drift ?? {}) }
+    : undefined;
+
+  if (!values.json) {
+    if (drift) {
+      process.stdout.write(
+        c.yellow(
+          "⚠ The generated Bicep differs from the template recorded in .azx/deploy.json —\n" +
+            "  the pipeline's first what-if will show changes, not a clean no-op. Re-run\n" +
+            "  `azx up --local-deploy` to refresh the ledger, or review the what-if before approving.\n\n",
+        ),
+      );
+    }
+    if (ledger?.partial) {
+      process.stdout.write(
+        c.yellow(
+          "⚠ .azx/deploy.json is from a PARTIAL (failed) local deploy — some resources may be\n" +
+            "  missing, so the pipeline's first what-if will show creates, not a no-op. The\n" +
+            "  generated README flags this; review the first run before approving.\n\n",
+        ),
+      );
+    }
+  }
+
+  // Budget block is a hard stop: never ship a plan a guardrail refused.
+  if (plan.budget.blocked) {
+    if (values.json) {
+      process.stdout.write(
+        JSON.stringify({ error: "blocked by budget guardrail", warnings: plan.budget.warnings }, null, 2) + "\n",
+      );
+    } else {
+      process.stdout.write(banner(c, `ship ${intent.app.name}`));
+      process.stdout.write(c.red("\n✗ Blocked by budget guardrail — refusing to ship.\n"));
+      for (const w of plan.budget.warnings) process.stdout.write("  " + c.yellow("⚠ " + w) + "\n");
+    }
+    return 1;
+  }
+
+  const execute = !!values["create-repo"];
+
+  if (execute) {
+    const result = runShip(intent, plan, bicep, shipOpts);
+    if (values.json) {
+      process.stdout.write(JSON.stringify({ ...result, adoption, recovered }, null, 2) + "\n");
+      return 0;
+    }
+    process.stdout.write(banner(c, `ship ${intent.app.name}  ${c.dim("(live)")}`));
+    process.stdout.write(c.dim(`  scaffold written to ${result.outDir}\n`));
+    for (const step of result.steps) {
+      process.stdout.write("  " + c.green("✓") + " " + step.description + "\n");
+    }
+    process.stdout.write(
+      "\n" + c.bold("Shipped.") + " The deploy pipeline now owns the real Azure deployment.\n",
+    );
+    if (!values.deploy) {
+      process.stdout.write(
+        c.dim(`  Trigger it with: gh workflow run deploy.yml --repo ${values["create-repo"]}\n`),
+      );
+    }
+    return 0;
+  }
+
+  // Dry run: plan the steps, write scaffold if --out given, print what would run.
+  const planned = shipSteps(intent, plan, bicep, shipOpts);
+  if (values.out) {
+    assertEmptyOutDir(planned.outDir);
+    writeScaffoldFiles(planned.outDir, planned.files);
+  }
+
+  if (values.json) {
+    process.stdout.write(
+      JSON.stringify({ ...planned, executed: false, adoption, recovered }, null, 2) + "\n",
+    );
+    return 0;
+  }
+
+  process.stdout.write(banner(c, `ship ${intent.app.name}  ${c.dim("(dry-run — no repo created)")}`));
+  process.stdout.write("\n" + c.bold("Scaffold\n"));
+  for (const f of planned.files) process.stdout.write("  " + c.dim("•") + " " + f.path + "\n");
+  if (values.out) process.stdout.write(c.dim(`\n  written to ${planned.outDir}\n`));
+
+  process.stdout.write("\n" + c.bold("Would run\n"));
+  for (const step of planned.steps) {
+    process.stdout.write("  " + c.dim("$ ") + renderStep(step) + "\n");
+    process.stdout.write("      " + c.dim(step.description) + "\n");
+  }
+  process.stdout.write(
+    "\n" +
+      c.dim("Add --create-repo <owner/name> to create + push the repo (needs `gh` auth).\n") +
+      c.dim("Add --deploy to also trigger the pipeline (real Azure deploy via OIDC).\n"),
+  );
+  return 0;
+}
+
+/** Render a ShipStep as a copy-pasteable command line. */
+function renderStep(step: ShipStep): string {
+  const quote = (a: string) => (/\s/.test(a) ? `"${a}"` : a);
+  return [step.cmd, ...step.args.map(quote)].join(" ");
 }
 
 function cmdSchema(values: Values): number {
@@ -582,7 +1051,9 @@ function printUsage(): void {
       "  scan <path>    detect the app and print the signals table (stage 0)",
       "  bicep <path>   print just the generated main.bicep",
       "  what-if <path> offline plan diff vs a prior plan (--against) + approval gate",
-      "  up <path>      STUB: print what would deploy (stage 3 — never deploys)",
+      "  up <path>      dry-run stub; add --local-deploy to REALLY deploy via `az` (what-if gated)",
+      "  ship <path>    scaffold a deploy repo (Bicep + CI/CD) and, with --create-repo,",
+      "                 create + push it so its pipeline does the real Azure deploy (OIDC)",
       "  schema         print the open app-intent.schema.json contract",
       "  help           show this help",
       "",
@@ -591,13 +1062,26 @@ function printUsage(): void {
       "  --guardrails <file>    apply a guardrails.yaml (policy wins over repo)",
       "  --subscription <file>  budget context (mock subscription.json)",
       "  --against <plan.json>  what-if: baseline plan to diff against (azx plan --json)",
-      "  --yes                  what-if: auto-approve without the interactive prompt",
-      "  --out <file>           write Bicep/schema to a file",
+      "  --yes                  approve: what-if apply / up --local-deploy real deploy",
+      "  --out <file|dir>       write Bicep/schema to a file, or the ship scaffold to a dir",
+      "  --scaffold <dir>       plan: also write the full deploy repo tree (Bicep + CI/CD)",
+      "  --create-repo <o/n>    ship: create + push a real GitHub repo (owner/name)",
+      "  --deploy               ship: trigger the deploy pipeline after push (real deploy)",
+      "  --private/--no-private ship: repo visibility (default: private)",
+      "  --local-deploy         up: really deploy to Azure via `az` (needs `az login`)",
+      "  --resource-group <rg>  up --local-deploy: target resource group (default rg-<app>)",
+      "  --region <r>           up --local-deploy: target region (default: plan region)",
+      "  --pg-password <p>      up --local-deploy: PostgreSQL admin password (if provisioned)",
+      "  --subscription-id <id> up --local-deploy: pin the Azure subscription",
       "  --no-bicep             omit the Bicep block from 'plan' output",
       "  --no-color             disable ANSI color",
       "  --version              print version",
       "",
-      "Everything is an offline dry-run. azx never calls Azure in POC #1.",
+      "Two ways to reach real Azure — both keep plan and apply separate:",
+      "  • `up --local-deploy` — imperative inner loop; `az` deploys, writes .azx/deploy.json.",
+      "  • `ship --create-repo` — codify into a GitHub repo whose OIDC pipeline deploys;",
+      "    it adopts .azx/deploy.json so the first what-if is typically a no-op (review it).",
+      "Everything else (plan/scaffold/what-if/up) is a fully offline dry-run.",
       "",
     ].join("\n"),
   );

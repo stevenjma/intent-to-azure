@@ -375,3 +375,48 @@ export interface ClockOptions {
   /** Returns "now". Defaults to `() => new Date()` in the CLI. */
   now?: () => Date;
 }
+
+// ---------------------------------------------------------------------------
+// Local deploy ledger — the continuity record between imperative + codified
+// ---------------------------------------------------------------------------
+
+/** One resource as recorded in a deploy ledger. */
+export interface LedgerResource {
+  id: string;
+  name: string;
+  type: string;
+}
+
+/**
+ * The record `azx up --local-deploy` writes to `.azx/deploy.json` after an
+ * imperative apply. It is the *continuity ledger*: `azx ship` reads it so the
+ * codified repo targets the exact same resource group / region / resource names,
+ * making the first pipeline `what-if` a provable no-op adoption of what local
+ * deploy already created.
+ */
+export interface DeployLedger {
+  generatedBy: "azx";
+  /** ISO timestamp of the apply. */
+  deployedAt: string;
+  /** Subscription the deploy targeted (if known). */
+  subscriptionId?: string;
+  /** Resource group the template was deployed into. */
+  resourceGroup: string;
+  /** Region the resource group / resources live in. */
+  region: string;
+  /** The ARM deployment name used (`azx-<timestamp>`). */
+  deploymentName: string;
+  /**
+   * SHA-256 of the exact `main.bicep` that was deployed. `azx ship` compares this
+   * against the template it regenerates and warns if they diverge, so the "first
+   * what-if is a no-op" adoption is verified rather than merely assumed.
+   */
+  templateHash?: string;
+  /**
+   * True when the apply failed partway (ARM deployments are not atomic). The ledger
+   * is still written so the orphaned resource group can be reconciled or torn down.
+   */
+  partial?: boolean;
+  /** The resources the plan created, for adoption + auditing. */
+  resources: LedgerResource[];
+}

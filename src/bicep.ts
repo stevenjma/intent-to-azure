@@ -7,8 +7,9 @@
 
 import type { AzurePlan, AzureResource } from "./types.js";
 
-/** Pinned API versions per ARM type (stable, review-friendly). */
-const API_VERSIONS: Record<string, string> = {
+/** Pinned API versions per ARM type (stable, review-friendly). Exported so the
+ * browser ARM-JSON emitter (`arm-template.ts`) pins the exact same versions. */
+export const API_VERSIONS: Record<string, string> = {
   "Microsoft.App/managedEnvironments": "2024-03-01",
   "Microsoft.App/containerApps": "2024-03-01",
   "Microsoft.App/jobs": "2024-03-01",
@@ -38,7 +39,7 @@ const API_VERSIONS: Record<string, string> = {
  * options: live catalog lookup, a maintained map, or omit-and-document.
  * Models not listed here fall back to the service default version.
  */
-const MODEL_VERSIONS: Record<string, string> = {
+export const MODEL_VERSIONS: Record<string, string> = {
   "gpt-4o": "2024-11-20",
   "gpt-4o-mini": "2024-07-18",
   "gpt-4.1": "2025-04-14",

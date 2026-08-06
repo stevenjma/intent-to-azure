@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Strict CSP. The SPA holds live ARM + GitHub tokens in memory, so XSS is the
+      crown-jewel risk (the shell/argv threats from the CLI don't exist in a browser).
+      No inline scripts (all logic is external ES modules); scripts only from self +
+      esm.sh (MSAL). connect-src is pinned to Azure/GitHub + common Worker hosts — if
+      your token-exchange Worker is on another origin, add it here (see web/README.md).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="
+        default-src 'none';
+        script-src 'self' https://esm.sh;
+        style-src 'self';
+        img-src 'self' data:;
+        font-src 'self';
+        connect-src 'self'
+          https://login.microsoftonline.com
+          https://management.azure.com
+          https://api.github.com
+          https://github.com
+          https://esm.sh
+          https://*.workers.dev
+          https://*.azurewebsites.net;
+        frame-src https://login.microsoftonline.com;
+        base-uri 'none';
+        form-action 'none';
+      "
+    />
+    <title>azx — App Intent → Azure, from your browser</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">azx</span>
+        <span class="tagline">App Intent → Azure — no install</span>
+      </div>
+      <div class="auth-buttons">
+        <button id="btn-azure" class="btn btn-azure" type="button">
+          <span class="dot" data-state="out"></span> Sign in with Azure
+        </button>
+        <button id="btn-github" class="btn btn-github" type="button">
+          <span class="dot" data-state="out"></span> Sign in with GitHub
+        </button>
+      </div>
+    </header>
+
+    <main>
+      <section id="setup-banner" class="banner hidden">
+        <strong>Setup needed.</strong> Copy <code>web/config.example.js</code> to
+        <code>web/config.js</code> and fill in your Entra SPA client ID, GitHub OAuth
+        client ID, and Worker URL. See <code>web/README.md</code>.
+      </section>
+
+      <section class="step">
+        <h2>1 · Point at a GitHub repo</h2>
+        <p class="hint">
+          Reads the repo's files in your browser via the GitHub API and infers what
+          Azure it needs. Nothing is sent anywhere except GitHub and (on deploy) Azure.
+        </p>
+        <form id="repo-form" class="repo-form">
+          <input
+            id="repo-input"
+            class="repo-input"
+            type="text"
+            placeholder="owner/repo  (e.g. vercel/next-learn)"
+            autocomplete="off"
+          />
+          <input
+            id="ref-input"
+            class="ref-input"
+            type="text"
+            placeholder="branch (optional)"
+            autocomplete="off"
+          />
+          <button id="btn-analyze" class="btn" type="submit">Analyze</button>
+        </form>
+        <p id="repo-status" class="status" role="status"></p>
+      </section>
+
+      <section id="results" class="results hidden">
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="intent" role="tab">Intent</button>
+          <button class="tab" data-tab="plan" role="tab">Plan</button>
+          <button class="tab" data-tab="bicep" role="tab">Bicep</button>
+          <button class="tab" data-tab="scaffold" role="tab">Scaffold</button>
+        </div>
+        <div class="tabpanels">
+          <div class="tabpanel active" data-panel="intent"><div id="intent-view"></div></div>
+          <div class="tabpanel" data-panel="plan"><div id="plan-view"></div></div>
+          <div class="tabpanel" data-panel="bicep"><pre id="bicep-view" class="code"></pre></div>
+          <div class="tabpanel" data-panel="scaffold"><div id="scaffold-view"></div></div>
+        </div>
+      </section>
+
+      <section id="deploy" class="step hidden">
+        <h2>2 · Deploy to Azure</h2>
+        <p class="hint">
+          Runs a real ARM <strong>what-if</strong> preview first (always), then deploys
+          only after you review and confirm. Requires Azure sign-in.
+        </p>
+        <div class="deploy-controls">
+          <label>
+            Subscription
+            <select id="sub-select" disabled></select>
+          </label>
+          <label>
+            Resource group
+            <input id="rg-input" type="text" placeholder="rg-myapp" />
+          </label>
+          <label>
+            Region
+            <input id="region-input" type="text" placeholder="eastus2" />
+          </label>
+        </div>
+        <div class="deploy-actions">
+          <button id="btn-whatif" class="btn" type="button" disabled>Run what-if</button>
+          <button id="btn-apply" class="btn btn-danger" type="button" disabled>
+            Deploy (create resources)
+          </button>
+        </div>
+        <pre id="deploy-log" class="code log"></pre>
+      </section>
+
+      <section id="ship" class="step hidden">
+        <h2>3 · Codify as a repo (optional)</h2>
+        <p class="hint">
+          Creates a new GitHub repo and pushes the generated Bicep + OIDC pipeline, so
+          future deploys run through GitHub Actions. Requires GitHub sign-in.
+        </p>
+        <div class="deploy-controls">
+          <label>
+            New repo
+            <input id="ship-repo-input" type="text" placeholder="my-app-infra" />
+          </label>
+          <label class="checkbox">
+            <input id="ship-private" type="checkbox" checked /> Private
+          </label>
+        </div>
+        <div class="deploy-actions">
+          <button id="btn-ship" class="btn" type="button" disabled>Create repo &amp; push</button>
+        </div>
+        <pre id="ship-log" class="code log"></pre>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span
+        >Offline preview runs entirely in your browser. Deploy talks directly to Azure
+        Resource Manager; repo push talks directly to GitHub. Tokens are held in memory
+        only and never persisted.</span
+      >
+    </footer>
+
+    <script src="./config.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

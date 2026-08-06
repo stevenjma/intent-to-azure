@@ -1,0 +1,266 @@
+/**
+ * Local-deploy tests — the imperative inner loop + continuity ledger.
+ *
+ * `runLocalDeploy` is the only azx path that reaches real Azure, but it does so
+ * exclusively through an injected {@link AzRunner}. Here we drive it with a fake
+ * runner so every branch — auth gate, what-if gate, the real apply, the emitted
+ * ledger, and error paths — is asserted fully offline. We also prove `ship`
+ * adopts the ledger so the codified pipeline targets the same resource group.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+import { resolveRepo } from "../src/index.js";
+import { runLocalDeploy, planNeedsPgPassword, DeployError, winQuoteArg, type AzRunner } from "../src/az-deploy.js";
+import { buildScaffold } from "../src/scaffold.js";
+
+const FIXED = new Date("2024-01-01T00:00:00.000Z");
+
+function build(name: string) {
+  return resolveRepo(fileURLToPath(new URL(`../../examples/${name}`, import.meta.url)), {
+    now: () => FIXED,
+  });
+}
+
+/** A fake `az` that records calls and returns success (logged-in) by default. */
+function fakeAz(overrides: Record<string, { status: number; stdout?: string; stderr?: string }> = {}) {
+  const calls: string[][] = [];
+  const runner: AzRunner = (args) => {
+    calls.push(args);
+    const key = args.slice(0, 3).join(" ");
+    if (overrides[key]) {
+      const o = overrides[key];
+      return { status: o.status, stdout: o.stdout ?? "", stderr: o.stderr ?? "" };
+    }
+    if (args[0] === "account" && args[1] === "show") {
+      // A realistic subscription GUID — `az account show` never returns a bare name.
+      const id = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+      // `account show --query id -o tsv` returns the raw id; the default `-o json` form
+      // returns the account object.
+      return args.includes("tsv")
+        ? { status: 0, stdout: id + "\n", stderr: "" }
+        : { status: 0, stdout: JSON.stringify({ id }), stderr: "" };
+    }
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  return { runner, calls };
+}
+
+// A real bicep file on disk so the template hash + secure params file behave as in
+// production (the caller writes main.bicep to a temp dir before deploying).
+const bicepDir = mkdtempSync(join(tmpdir(), "azx-azd-test-"));
+const bicepPath = join(bicepDir, "main.bicep");
+writeFileSync(bicepPath, "// test bicep\n");
+
+const pgOpts = {
+  bicepPath,
+  resourceGroup: "rg-django-notes",
+  region: "eastus2",
+  pgPassword: "P@ssw0rd!",
+};
+
+test("planNeedsPgPassword detects the Postgres flexible server", () => {
+  assert.equal(planNeedsPgPassword(build("django-notes").plan), true);
+});
+
+test("Postgres plan without a password is refused before any az call", () => {
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz();
+  assert.throws(
+    () => runLocalDeploy(plan, { ...pgOpts, pgPassword: undefined }, runner),
+    /--pg-password/,
+  );
+  assert.equal(calls.length, 0, "must not call az when a required param is missing");
+});
+
+test("not logged in is a hard stop", () => {
+  const { plan } = build("django-notes");
+  const { runner } = fakeAz({ "account show -o": { status: 1, stderr: "Please run az login" } });
+  assert.throws(() => runLocalDeploy(plan, pgOpts, runner), /az login/);
+});
+
+test("what-if failure refuses to deploy", () => {
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz({
+    "deployment group what-if": { status: 1, stderr: "BCP error" },
+  });
+  assert.throws(() => runLocalDeploy(plan, { ...pgOpts, apply: true }, runner), /refusing to deploy/);
+  // It attempted what-if but never reached create.
+  assert.ok(!calls.some((c) => c[2] === "create"), "must not create after a failed what-if");
+});
+
+test("default (no apply) stops after the what-if gate — no create, no ledger", () => {
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz();
+  const res = runLocalDeploy(plan, pgOpts, runner);
+  assert.equal(res.applied, false);
+  assert.equal(res.ledger, undefined);
+  assert.ok(calls.some((c) => c[2] === "what-if"), "what-if must run");
+  assert.ok(!calls.some((c) => c[2] === "create"), "create must NOT run without apply");
+});
+
+test("apply runs the real create and returns a continuity ledger", () => {
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz();
+  const res = runLocalDeploy(plan, { ...pgOpts, apply: true, now: () => FIXED }, runner);
+
+  assert.equal(res.applied, true);
+  // Ordered az calls: account → group create → what-if → deployment create.
+  const seq = calls.map((c) => c.slice(0, 3).join(" "));
+  assert.deepEqual(seq, [
+    "account show -o",
+    "group create -n",
+    "deployment group what-if",
+    "deployment group create",
+  ]);
+
+  const led = res.ledger!;
+  assert.equal(led.resourceGroup, "rg-django-notes");
+  assert.equal(led.region, "eastus2");
+  assert.equal(led.subscriptionId, "3f2504e0-4f89-41d3-9a0c-0305e82c3301");
+  assert.equal(led.deploymentName, "azx-2024-01-01T00-00-00-000Z");
+  assert.equal(led.resources.length, plan.resources.length);
+  // The template hash is recorded so `ship` can verify a clean adoption.
+  assert.match(led.templateHash!, /^[0-9a-f]{64}$/);
+  assert.notEqual(led.partial, true);
+});
+
+test("the Postgres password never appears on argv — a @secure params file is used", () => {
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz();
+  runLocalDeploy(plan, { ...pgOpts, apply: true, now: () => FIXED }, runner);
+
+  // Both what-if and create reference a params FILE, never the raw secret inline.
+  for (const sub of ["what-if", "create"]) {
+    const call = calls.find((c) => c[2] === sub)!;
+    assert.ok(
+      call.some((a) => a.startsWith("@")),
+      `${sub} must pass --parameters @file`,
+    );
+  }
+  assert.ok(
+    !calls.some((c) => c.some((a) => a.includes("P@ssw0rd!"))),
+    "the raw password must never appear in any az argument",
+  );
+});
+
+test("a failed create emits a partial ledger for reconciliation", () => {
+  const { plan } = build("django-notes");
+  const { runner } = fakeAz({
+    "deployment group create": { status: 1, stderr: "quota exceeded" },
+  });
+  try {
+    runLocalDeploy(plan, { ...pgOpts, apply: true, now: () => FIXED }, runner);
+    assert.fail("expected a DeployError");
+  } catch (err) {
+    assert.ok(err instanceof DeployError);
+    assert.equal(err.ledger?.partial, true);
+    assert.equal(err.ledger?.resourceGroup, "rg-django-notes");
+  }
+});
+
+test("ship adopts the ledger: pipeline targets the same resource group", () => {
+  const { intent, plan, bicep } = build("django-notes");
+  const { runner } = fakeAz();
+  const res = runLocalDeploy(plan, { ...pgOpts, apply: true, now: () => FIXED }, runner);
+
+  const wf = buildScaffold(intent, plan, bicep, { ledger: res.ledger }).find(
+    (f) => f.path === ".github/workflows/deploy.yml",
+  )!.content;
+  assert.ok(wf.includes('RESOURCE_GROUP: "rg-django-notes"'), "pipeline must reuse the ledger RG");
+
+  const readme = buildScaffold(intent, plan, bicep, { ledger: res.ledger }).find(
+    (f) => f.path === "README.md",
+  )!.content;
+  assert.ok(readme.includes("Adopting an existing local deploy"), "README should note adoption");
+});
+
+test("a subscription NAME override is canonicalized to a GUID in the ledger", () => {
+  // `az account set` accepts a subscription NAME, but the ledger must record the
+  // canonical GUID — otherwise the strict loader rejects it on the next ship/re-run.
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz();
+  const res = runLocalDeploy(
+    plan,
+    { ...pgOpts, subscriptionId: "My Subscription Name", apply: true, now: () => FIXED },
+    runner,
+  );
+  assert.equal(res.ledger!.subscriptionId, "3f2504e0-4f89-41d3-9a0c-0305e82c3301");
+  // It re-queried the id after `account set` rather than trusting the raw name.
+  assert.ok(
+    calls.some((a) => a[0] === "account" && a[1] === "set" && a.includes("My Subscription Name")),
+    "pins by the provided name",
+  );
+  assert.ok(
+    calls.some((a) => a[0] === "account" && a[1] === "show" && a.includes("tsv")),
+    "re-queries the canonical id",
+  );
+  // The persisted ledger is one the strict loader would accept.
+  assert.doesNotThrow(() => buildScaffold(build("django-notes").intent, plan, "// b", { ledger: res.ledger! }));
+});
+
+test("a subscription that can't be canonicalized fails BEFORE any resource is created", () => {
+  // If `az account set` accepts a name but the id re-query fails open (nonzero/empty),
+  // subscriptionId would stay a non-GUID name. We must refuse before `az group create`
+  // so no billable resources exist behind an unwritable ledger.
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz({ "account show --query": { status: 1, stdout: "" } });
+  assert.throws(
+    () =>
+      runLocalDeploy(
+        plan,
+        { ...pgOpts, subscriptionId: "My Subscription Name", apply: true, now: () => FIXED },
+        runner,
+      ),
+    /canonical GUID|Refusing to deploy/,
+  );
+  // Crucially: it failed before ensuring the resource group or deploying.
+  assert.ok(!calls.some((a) => a[0] === "group" && a[1] === "create"), "must not create the RG");
+  assert.ok(
+    !calls.some((a) => a[0] === "deployment" && a[2] === "create"),
+    "must not deploy",
+  );
+});
+
+test("an UNDEFINED subscription (malformed `az account show`) fails BEFORE any resource is created", () => {
+  // No --subscription-id, and `az account show -o json` returns valid JSON with NO `id`
+  // (or unparseable output). subscriptionId stays undefined; deploying would target
+  // whatever account is current and then persistLedger would reject the ledger AFTER
+  // resources are live. The gate must stop us before `az group create`.
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz({ "account show -o": { status: 0, stdout: "{}" } });
+  assert.throws(
+    () => runLocalDeploy(plan, { ...pgOpts, apply: true, now: () => FIXED }, runner),
+    /canonical GUID|Refusing to deploy/,
+  );
+  assert.ok(!calls.some((a) => a[0] === "group" && a[1] === "create"), "must not create the RG");
+  assert.ok(!calls.some((a) => a[0] === "deployment" && a[2] === "create"), "must not deploy");
+});
+
+test("winQuoteArg wraps args in double quotes and doubles embedded quotes", () => {
+  assert.equal(winQuoteArg("plain"), '"plain"');
+  assert.equal(winQuoteArg("a b"), '"a b"'); // spaces (e.g. a %TEMP% path) stay one token
+  assert.equal(winQuoteArg("R&D"), '"R&D"'); // cmd.exe metachars are literal inside quotes
+  assert.equal(winQuoteArg('x"y'), '"x""y"');
+});
+
+test("Windows: a spaced path and a metachar arg survive cmd.exe as single literal tokens", (t) => {
+  // Empirical proof of the runner's quoting on the real shell: mirror defaultAzRunner's
+  // cmd.exe path (shell:true with a pre-quoted command line) using a harmless echo
+  // program, and confirm both a space-containing arg and one with `&` round-trip intact.
+  if (process.platform !== "win32") {
+    t.skip("cmd.exe quoting is Windows-only");
+    return;
+  }
+  const script = "process.stdout.write(process.argv.slice(1).join('\\u0000'))";
+  const args = ["C:\\Users\\First Last\\Temp\\main.bicep", "R&D | Sub"];
+  const cmdline = [process.execPath, "-e", script, ...args].map(winQuoteArg).join(" ");
+  const r = spawnSync(cmdline, { encoding: "utf8", shell: true });
+  assert.equal(r.status, 0, `spawn failed: ${r.stderr}`);
+  assert.deepEqual((r.stdout ?? "").split("\u0000"), args, "args must not word-split or inject");
+});
