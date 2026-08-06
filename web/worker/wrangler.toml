@@ -4,8 +4,10 @@ compatibility_date = "2024-11-01"
 
 # Public, non-secret values. Set the origin to your Pages URL origin.
 [vars]
-ALLOWED_ORIGIN = "https://YOUR_USER.github.io"
+ALLOWED_ORIGIN = "https://stevenjma.github.io"
 GITHUB_CLIENT_ID = "YOUR_GITHUB_OAUTH_CLIENT_ID"
 
-# GITHUB_CLIENT_SECRET is a SECRET — do NOT put it here. Set it with:
-#   wrangler secret put GITHUB_CLIENT_SECRET
+# GITHUB_CLIENT_SECRET is a SECRET — do NOT put it here. In the Cloudflare
+# dashboard set it under the Worker's Settings → Variables and Secrets as an
+# encrypted Secret (or `wrangler secret put GITHUB_CLIENT_SECRET` locally).
+# Secrets are NOT overwritten by wrangler deploy; [vars] above ARE.
