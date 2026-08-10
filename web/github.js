@@ -136,6 +136,55 @@ export function githubSignOut() {
   user = null;
 }
 
+/**
+ * List repositories the authenticated user can access — across their personal
+ * account and any orgs where this OAuth App has been granted — most-recently
+ * pushed first. Pages up to `maxPages`×100 results so the type-ahead has a
+ * useful working set without unbounded API calls. Returns lightweight rows.
+ */
+export async function listAccessibleRepos(maxPages = 4) {
+  if (!token) throw new Error("Sign in with GitHub first.");
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await gh(
+      `/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member&page=${page}`,
+    );
+    if (!Array.isArray(rows) || rows.length === 0) break;
+    for (const r of rows) {
+      out.push({
+        fullName: r.full_name,
+        defaultBranch: r.default_branch,
+        private: !!r.private,
+        pushedAt: r.pushed_at,
+      });
+    }
+    if (rows.length < 100) break;
+  }
+  return out;
+}
+
+/**
+ * Search repositories the user can reach by free-text, for queries beyond the
+ * locally-cached page set. Scopes to repos owned by or visible to the user via
+ * GitHub's search API. Returns the same lightweight row shape.
+ */
+export async function searchRepos(query) {
+  if (!token) throw new Error("Sign in with GitHub first.");
+  const q = query.trim();
+  if (!q) return [];
+  const login = (user && user.login) || (await gh("/user")).login;
+  // `user:<login>` keeps results to repos the caller owns; the local list
+  // already covers org/collaborator repos for the recent working set.
+  const enc = encodeURIComponent(`${q} user:${login} fork:true`);
+  const res = await gh(`/search/repositories?q=${enc}&per_page=20&sort=updated`);
+  return (res.items || []).map((r) => ({
+    fullName: r.full_name,
+    defaultBranch: r.default_branch,
+    private: !!r.private,
+    pushedAt: r.pushed_at,
+  }));
+}
+
 /** Resolve `owner/repo` (+ optional ref) → { files: Map, defaultBranch, truncated }. */
 export async function fetchRepoFiles(ownerRepo, ref) {
   const [owner, repo] = ownerRepo.split("/").map((s) => s.trim());
