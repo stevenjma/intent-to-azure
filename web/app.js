@@ -14,6 +14,8 @@ import {
   githubUser,
   fetchRepoFiles,
   createRepoAndPush,
+  listAccessibleRepos,
+  searchRepos,
 } from "./github.js";
 import {
   azureSignIn,
@@ -44,6 +46,7 @@ function boot() {
   $("btn-azure").addEventListener("click", onAzureSignIn);
   $("btn-github").addEventListener("click", onGithubSignIn);
   $("repo-form").addEventListener("submit", onAnalyze);
+  $("repo-input").addEventListener("input", onRepoInput);
   $("btn-whatif").addEventListener("click", onWhatIf);
   $("btn-apply").addEventListener("click", onApply);
   $("btn-ship").addEventListener("click", onShip);
@@ -86,10 +89,67 @@ async function onGithubSignIn() {
     setDot("btn-github", "in");
     $("btn-github").lastChild.textContent = ` ${user.login}`;
     refreshShipAvailability();
+    loadRepoChoices();
   } catch (err) {
     setDot("btn-github", "out");
     alert(`GitHub sign-in failed: ${err.message}`);
   }
+}
+
+// --------------------------------------------------------------------------
+// Repo picker (type-ahead over the user's accessible repos)
+// --------------------------------------------------------------------------
+
+/** Known repo rows for the datalist, keyed by full name (dedup across sources). */
+const repoChoices = new Map();
+let repoSearchTimer = null;
+
+function renderRepoOptions() {
+  const dl = $("repo-list");
+  const rows = [...repoChoices.values()]
+    .sort((a, b) => (b.pushedAt || "").localeCompare(a.pushedAt || ""))
+    .slice(0, 100);
+  dl.replaceChildren(
+    ...rows.map((r) => {
+      const o = document.createElement("option");
+      o.value = r.fullName;
+      o.label = r.private ? "private" : "public";
+      return o;
+    }),
+  );
+}
+
+function mergeRepos(rows) {
+  for (const r of rows) if (r.fullName) repoChoices.set(r.fullName, r);
+  renderRepoOptions();
+}
+
+/** After sign-in, seed the picker with the user's most-recently-pushed repos. */
+async function loadRepoChoices() {
+  $("repo-input").placeholder = "Loading your repos…";
+  try {
+    mergeRepos(await listAccessibleRepos());
+    $("repo-input").placeholder = "owner/repo  (type to search your repos)";
+  } catch (err) {
+    $("repo-input").placeholder = "owner/repo";
+    // Non-fatal: manual entry still works.
+    console.warn("Could not list repos:", err.message);
+  }
+}
+
+/** Debounced server-side search for queries beyond the seeded page set. */
+function onRepoInput() {
+  if (!githubSignedIn()) return;
+  const q = $("repo-input").value.trim();
+  if (q.length < 2 || q.includes("/")) return; // full owner/repo already narrows locally
+  clearTimeout(repoSearchTimer);
+  repoSearchTimer = setTimeout(async () => {
+    try {
+      mergeRepos(await searchRepos(q));
+    } catch (err) {
+      console.warn("Repo search failed:", err.message);
+    }
+  }, 300);
 }
 
 // --------------------------------------------------------------------------
