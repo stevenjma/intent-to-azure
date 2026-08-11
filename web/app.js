@@ -189,8 +189,40 @@ async function onAnalyze(ev) {
     refreshShipAvailability();
   } catch (err) {
     status.className = "status err";
-    status.textContent = err.message;
+    renderRepoError(status, err);
   }
+}
+
+/**
+ * Render an analyze error into the status line. For GitHub's org OAuth-App
+ * restriction 403, swap the raw message for a short explanation plus a one-click
+ * "Grant access" deep-link to the org's OAuth App policy page (opens in a new
+ * tab). Nodes are built with the DOM API so the org name is never interpolated
+ * into HTML. Everything else falls back to plain text.
+ */
+function renderRepoError(status, err) {
+  const r = err.orgRestriction;
+  if (!r) {
+    status.textContent = err.message;
+    return;
+  }
+  status.textContent = "";
+  status.append(
+    document.createTextNode(
+      `The “${r.org}” org restricts third-party OAuth Apps, so this app can't read its repos yet. An org owner can grant access here: `,
+    ),
+  );
+  const a = document.createElement("a");
+  a.href = r.grantUrl;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.textContent = `Grant this app access to ${r.org} ↗`;
+  status.append(a);
+  status.append(
+    document.createTextNode(
+      " After granting, sign out and sign back in with GitHub, then retry.",
+    ),
+  );
 }
 
 // --------------------------------------------------------------------------
