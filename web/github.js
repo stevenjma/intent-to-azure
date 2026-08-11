@@ -56,6 +56,32 @@ function wantFile(path, size) {
   return INTERESTING.has(base) || TEXT_EXT.has(ext(path));
 }
 
+/**
+ * Build the org-owner OAuth App policy page URL where an owner grants this app
+ * access to a restricted org's data.
+ */
+export function orgGrantUrl(org) {
+  return `https://github.com/organizations/${encodeURIComponent(org)}/settings/oauth_application_policy`;
+}
+
+/**
+ * Detect GitHub's "OAuth App access restrictions" 403 and, if matched, return
+ * `{ org, grantUrl }` so the UI can offer a one-click grant deep-link. GitHub
+ * names the org in backticks in the message; fall back to the owner segment of
+ * a `/repos/<owner>/…` request path.
+ */
+function orgRestriction(status, message, path) {
+  if (status !== 403 || !/OAuth App access restrictions/i.test(message || "")) {
+    return null;
+  }
+  let org = (message.match(/`([^`]+)`/) || [])[1];
+  if (!org) {
+    org = (path.match(/\/repos\/([^/]+)\//) || [])[1];
+  }
+  if (!org) return null;
+  return { org, grantUrl: orgGrantUrl(org) };
+}
+
 async function gh(path, { method = "GET", body, raw = false } = {}) {
   const headers = { Accept: "application/vnd.github+json" };
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -72,7 +98,11 @@ async function gh(path, { method = "GET", body, raw = false } = {}) {
     } catch {
       /* ignore */
     }
-    throw new Error(`GitHub ${method} ${path} → ${res.status} ${detail}`.trim());
+    const err = new Error(`GitHub ${method} ${path} → ${res.status} ${detail}`.trim());
+    err.status = res.status;
+    const restriction = orgRestriction(res.status, detail, path);
+    if (restriction) err.orgRestriction = restriction;
+    throw err;
   }
   return raw ? res : res.json();
 }
