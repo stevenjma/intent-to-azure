@@ -49,8 +49,22 @@ const dirty = { rg: false, region: false, ship: false };
 // --------------------------------------------------------------------------
 
 function boot() {
-  const missing = !cfg.azureClientId || !cfg.githubClientId || !cfg.githubWorkerUrl;
-  if (missing) $("setup-banner").classList.remove("hidden");
+  // Name every required identifier so the setup banner can say exactly what's
+  // missing (self-host forkers hit partial-config states otherwise — DR-010).
+  const REQUIRED = [
+    ["azureClientId", "Entra SPA client ID (azureClientId)"],
+    ["githubClientId", "GitHub OAuth App client ID (githubClientId)"],
+    ["githubWorkerUrl", "token-exchange Worker URL (githubWorkerUrl)"],
+  ];
+  const missing = REQUIRED.filter(([key]) => !cfg[key]);
+  if (missing.length) {
+    const banner = $("setup-banner");
+    banner.classList.remove("hidden");
+    const list = document.createElement("p");
+    list.className = "banner-missing";
+    list.textContent = "Missing: " + missing.map(([, label]) => label).join(", ") + ".";
+    banner.appendChild(list);
+  }
 
   $("btn-azure").addEventListener("click", onAzureSignIn);
   $("btn-github").addEventListener("click", onGithubSignIn);

@@ -66,14 +66,21 @@ export default {
  * Return an HTML page that posts the result to the opener and closes. The payload
  * is JSON-embedded server-side (from a trusted token exchange), and targetOrigin is
  * pinned to ALLOWED_ORIGIN so no other page can receive the token.
+ *
+ * SECURITY: `payload` includes the request-supplied `state`, which is
+ * attacker-controlled and reflected here. `JSON.stringify` does NOT escape `<`, `>`
+ * or `/`, so a raw `</script>` in `state` would break out of this inline <script>
+ * and (under `script-src 'unsafe-inline'`) execute injected markup — a reflected
+ * XSS. We run every JSON literal embedded in the script through `safeJsonForScript`,
+ * which escapes those characters as `\uXXXX` so the value stays inert data.
  */
 function htmlMessage(env, payload) {
-  const body = JSON.stringify({ type: "azx-github-token", ...payload });
+  const body = safeJsonForScript(JSON.stringify({ type: "azx-github-token", ...payload }));
   const origin = env.ALLOWED_ORIGIN;
   const html = `<!DOCTYPE html><html><body><script>
     (function () {
       var payload = ${body};
-      var target = ${JSON.stringify(origin)};
+      var target = ${safeJsonForScript(JSON.stringify(origin))};
       if (window.opener) window.opener.postMessage(payload, target);
       document.body.textContent = payload.error ? ("Sign-in failed: " + payload.error) : "Signed in — you can close this window.";
       window.close();
@@ -87,4 +94,20 @@ function htmlMessage(env, payload) {
       "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; frame-ancestors 'none'",
     },
   });
+}
+
+/**
+ * Escape a JSON string for safe inlining inside an HTML <script> element. JSON is
+ * valid JS, but the HTML parser sees `</script>` (and `<!--`) regardless of JS
+ * string context, so we escape the characters that could terminate the element or
+ * be misparsed: `<`, `>`, `&`, and the U+2028/U+2029 line terminators (which are
+ * literal newlines in JS and would break the expression).
+ */
+function safeJsonForScript(json) {
+  return json
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
 }

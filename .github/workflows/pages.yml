@@ -47,9 +47,13 @@ jobs:
           AZURE_TENANT: ${{ vars.AZURE_TENANT }}
           GH_OAUTH_CLIENT_ID: ${{ vars.GH_OAUTH_CLIENT_ID }}
           GH_WORKER_URL: ${{ vars.GH_WORKER_URL }}
+          GH_SCOPES: ${{ vars.GH_SCOPES }}
         run: |
-          # All four are PUBLIC identifiers (no secrets). Set them under
+          # All identifiers are PUBLIC (no secrets). Set them under
           # Settings → Secrets and variables → Actions → Variables.
+          # GH_SCOPES is optional; the canonical default below is the single
+          # source of truth for OAuth scopes (kept in sync by
+          # test/oauth-scopes-consistent.test.ts).
           if [ -z "$AZURE_CLIENT_ID" ]; then
             echo "AZURE_CLIENT_ID variable unset — publishing placeholder config (setup banner)."
             cp web/config.example.js web/config.js
@@ -60,7 +64,7 @@ jobs:
             azureTenant: "${AZURE_TENANT:-common}",
             githubClientId: "${GH_OAUTH_CLIENT_ID}",
             githubWorkerUrl: "${GH_WORKER_URL}",
-            githubScopes: "repo workflow read:user",
+            githubScopes: "${GH_SCOPES:-repo workflow read:user}",
           };
           EOF
             echo "Generated web/config.js from repo Variables."

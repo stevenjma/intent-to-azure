@@ -1,25 +1,30 @@
 /**
- * azx web — deployment configuration.
+ * azx web — deployment configuration (SELF-HOST TEMPLATE).
  *
- * Copy this file to `web/config.js` and fill in the three values below. `config.js`
- * is gitignored so your client IDs never get committed. All three are PUBLIC
- * identifiers (safe to expose in a browser) — the only real secret is the GitHub
- * OAuth *client secret*, which lives ONLY in the token-exchange Worker, never here.
+ * azx is a fork-to-self-host template: each operator runs their OWN instance with
+ * their OWN identities. Copy this file to `web/config.js` and fill in the values
+ * below — every one is a PUBLIC identifier (safe to expose in a browser). The only
+ * real secret is the GitHub OAuth *client secret*, which lives ONLY in the
+ * token-exchange Worker, never here. `config.js` is gitignored so your ids never
+ * get committed. This is NOT a shared hosted service: do not point your deployment
+ * at someone else's Entra app or Worker.
  *
- * See web/README.md for how to provision each of these.
+ * See web/README.md for the full per-operator setup checklist.
  */
 window.AZX_CONFIG = {
   /**
-   * Entra (Azure AD) App Registration — type "Single-page application (SPA)".
-   * Redirect URI must be the exact Pages URL, e.g.
+   * Entra (Azure AD) App Registration — type "Single-page application (SPA)",
+   * registered in YOUR tenant. Redirect URI must be the exact Pages URL, e.g.
    *   https://<user>.github.io/<repo>/
    * Grant delegated permission "Azure Service Management / user_impersonation".
    */
   azureClientId: "",
 
   /**
-   * Entra tenant. Use "common" to let any work/school/personal account sign in,
-   * or a specific tenant GUID / domain to restrict it.
+   * Entra tenant for YOUR app. Use your tenant GUID/domain to restrict sign-in to
+   * your org, "organizations" for any work/school tenant, or "common" to also admit
+   * personal Microsoft accounts. Because you register the app in your own tenant,
+   * user consent is trivial (no unverified-publisher admin-consent wall).
    */
   azureTenant: "common",
 

@@ -24,29 +24,53 @@ GitHub ◀── git-data ── create repo + push scaffold               (OAut
 - **Deploy safety**: the app always runs an ARM **what-if** and shows the predicted
   changes; the Deploy button stays disabled until you've reviewed a successful what-if.
 
-## Configure (three public values)
+## Deployment model: fork-to-self-host
 
-Copy `config.example.js` to `config.js` and fill in:
+azx is a **self-host template**, not a shared hosted service. Each operator forks the
+repo and runs their **own** instance wired to their **own** identities — your Entra
+app, your GitHub OAuth App, your Worker. Nothing is shared between operators, and no
+central service sees your tokens. (This is why sign-in "just works" without an
+unverified-publisher admin-consent wall: the Entra app is registered in *your* tenant,
+so consent is yours to give.)
 
-| Value | What it is | Where |
-|---|---|---|
-| `azureClientId` | Entra **App Registration** (type: *Single-page application*). Add redirect URI = your Pages URL; grant delegated **Azure Service Management / user_impersonation**. | Entra portal → App registrations |
-| `githubClientId` | **GitHub OAuth App** client id. Callback URL = the Worker's `/callback`. | GitHub → Settings → Developer settings → OAuth Apps |
-| `githubWorkerUrl` | Base URL of the deployed token-exchange Worker. | See [worker/README.md](./worker/README.md) |
+## Self-host setup checklist
 
-All three are public identifiers, safe in the browser. The only real secret is the
-GitHub OAuth **client secret**, which lives only in the Worker (`wrangler secret`).
-`config.js` is gitignored so your ids never get committed.
+Do these once, in order. All the IDs below are **public** (safe in the browser); the
+only secret is the GitHub OAuth **client secret**, which lives only in the Worker.
 
-## Deploy to GitHub Pages
+1. **Fork this repo** and enable Pages: Settings → Pages → Source = **GitHub Actions**.
+   Note your Pages URL: `https://<you>.github.io/<repo>/`.
+2. **Register an Entra SPA app** (Azure portal → App registrations, in *your* tenant):
+   - Platform **Single-page application**, Redirect URI = your exact Pages URL.
+   - API permissions → delegated **Azure Service Management / user_impersonation**.
+   - Copy the **Application (client) ID** → `AZURE_CLIENT_ID`.
+3. **Create a GitHub OAuth App** (Settings → Developer settings → OAuth Apps):
+   - Authorization callback URL = your Worker's `/callback` (from step 4).
+   - Copy the **client ID** → `GH_OAUTH_CLIENT_ID`; keep the **client secret** for step 4.
+4. **Deploy the token-exchange [Worker](./worker/README.md)** with `ALLOWED_ORIGIN` =
+   your Pages origin and the GitHub client secret as a `wrangler secret`. Note its base
+   URL → `GH_WORKER_URL`. A custom domain works with no CSP change.
+5. **Set repo Actions Variables** (Settings → Secrets and variables → Actions →
+   **Variables**): `AZURE_CLIENT_ID`, `GH_OAUTH_CLIENT_ID`, `GH_WORKER_URL`, and
+   optionally `AZURE_TENANT` (default `common`) and `GH_SCOPES` (default
+   `repo workflow read:user`). Push to `main` — [`pages.yml`](../.github/workflows/pages.yml)
+   builds the engine and generates `web/config.js` from these Variables.
 
-1. **Enable Pages**: repo Settings → Pages → Source = **GitHub Actions**.
-2. Push to `main`. The [`pages.yml`](../.github/workflows/pages.yml) workflow runs
-   `npm run build:web` (compiles the engine → `web/engine/`) and publishes `web/`.
-3. Deploy the [Worker](./worker/README.md) and fill in `config.js` (commit it to a
-   private fork, or inject it in the workflow — it holds only public ids).
+If any Variable is missing the site shows a **setup banner naming exactly what's
+unset**, so partial configs fail loudly rather than at click time.
 
-The Entra redirect URI and the GitHub OAuth callback must match your final Pages URL.
+## Configure (reference)
+
+`web/config.js` (gitignored) is generated in CI, or you can copy `config.example.js`
+locally and fill in:
+
+| Value | What it is |
+|---|---|
+| `azureClientId` | Entra SPA app **client ID** (your tenant). Redirect URI = your Pages URL. |
+| `azureTenant` | `common` (default) / `organizations` / your tenant GUID. |
+| `githubClientId` | Your **GitHub OAuth App** client ID. Callback = the Worker's `/callback`. |
+| `githubWorkerUrl` | Base URL of your deployed token-exchange Worker. |
+| `githubScopes` | OAuth scopes (default `repo workflow read:user`). Canonical value is guarded by `test/oauth-scopes-consistent.test.ts`. |
 
 ## Run locally
 
@@ -67,7 +91,9 @@ CLI's argv/command-injection surface disappears — but the page holds a live **
 token** and a **GitHub token** in memory, so **XSS is the crown-jewel risk**. Mitigations:
 
 - **Strict CSP** (in `index.html`): `default-src 'none'`, no inline scripts, scripts
-  only from `self` + `esm.sh` (MSAL), `connect-src` pinned to Azure/GitHub + the Worker.
+  only from `self` + `esm.sh` (MSAL), `connect-src` pinned to Azure ARM + the GitHub
+  API + esm.sh. The Worker isn't in `connect-src` because the SPA never fetches it —
+  it's reached via `window.open` + `postMessage`.
 - **Tokens are never persisted** — MSAL uses `memoryStorage`; the GitHub token is a
   module-scoped variable. A refresh signs you out.
 - **OAuth token delivery is origin-pinned**: the Worker `postMessage`s to your exact

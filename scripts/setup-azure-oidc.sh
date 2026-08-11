@@ -20,7 +20,7 @@
 set -euo pipefail
 
 APP_NAME="azx-e2e-oidc"
-BRANCH="poc-1-dry-run-engine"
+BRANCH=""
 SUBSCRIPTION=""
 
 while [[ $# -gt 0 ]]; do
@@ -33,6 +33,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+# Default the federated branch to the repo's actual default branch so the branch
+# FIC subject matches real pushes. A hardcoded default silently no-ops for any repo
+# whose default branch differs. Override with --branch.
+[[ -n "$BRANCH" ]] || BRANCH="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)"
+[[ -n "$BRANCH" ]] || BRANCH="main"
 [[ -n "$SUBSCRIPTION" ]] || SUBSCRIPTION="$(az account show --query id -o tsv)"
 TENANT="$(az account show --query tenantId -o tsv)"
 ISSUER="https://token.actions.githubusercontent.com"
