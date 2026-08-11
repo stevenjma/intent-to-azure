@@ -30,10 +30,19 @@ import {
 const cfg = window.AZX_CONFIG || {};
 const $ = (id) => document.getElementById(id);
 
-/** Current analysis result: { intent, plan, bicep, scaffold, appName }. */
+/** Current analysis result: { intent, plan, bicep, scaffold, appName, hosting }. */
 let current = null;
 /** True once a what-if has succeeded for the current deploy inputs (gates apply). */
 let whatIfOk = false;
+
+/** The linear stages. `codify`/`deploy` are the two "Act" spokes off `review`. */
+const STAGES = ["source", "review", "codify", "deploy"];
+/** The stage currently shown (exactly one `#stage-*` is visible at a time). */
+let currentStage = "source";
+/** Which act spoke the "Act" stepper item returns to (last one chosen). */
+let lastAct = "codify";
+/** Tracks fields the user has hand-edited so a re-analyze won't clobber them. */
+const dirty = { rg: false, region: false, ship: false };
 
 // --------------------------------------------------------------------------
 // Setup / boot
@@ -50,14 +59,77 @@ function boot() {
   $("btn-whatif").addEventListener("click", onWhatIf);
   $("btn-apply").addEventListener("click", onApply);
   $("btn-ship").addEventListener("click", onShip);
+  $("go-codify").addEventListener("click", () => goToStage("codify"));
+  $("go-deploy").addEventListener("click", () => goToStage("deploy"));
 
-  for (const t of document.querySelectorAll(".tab")) {
-    t.addEventListener("click", () => selectTab(t.dataset.tab));
+  // Stepper + back buttons: any element with data-stage navigates.
+  for (const el of document.querySelectorAll("[data-stage]")) {
+    el.addEventListener("click", () => goToStage(el.dataset.stage));
   }
-  // Any change to deploy inputs invalidates a prior what-if.
+
+  // Deploy inputs: changing them invalidates a prior what-if and marks dirty.
   for (const id of ["sub-select", "rg-input", "region-input"]) {
-    $(id).addEventListener("input", () => setWhatIfOk(false));
+    $(id).addEventListener("input", () => {
+      if (id === "rg-input") dirty.rg = true;
+      if (id === "region-input") dirty.region = true;
+      setWhatIfOk(false);
+    });
   }
+  $("ship-repo-input").addEventListener("input", () => {
+    dirty.ship = true;
+  });
+
+  // Deep-link support: #review / #codify / #deploy on boot (guarded).
+  const hash = location.hash.replace(/^#/, "");
+  if (STAGES.includes(hash)) currentStage = hash;
+  render();
+}
+
+// --------------------------------------------------------------------------
+// Stage state machine
+// --------------------------------------------------------------------------
+
+/** Navigate to a stage. `act` resolves to the last-chosen spoke. Guards gate. */
+function goToStage(stage) {
+  if (stage === "act") stage = lastAct;
+  if (!STAGES.includes(stage)) return;
+  // Every stage past source requires an analyzed repo.
+  if (stage !== "source" && !current) return;
+  if (stage === "codify" || stage === "deploy") lastAct = stage;
+  currentStage = stage;
+  history.replaceState(null, "", `#${stage}`);
+  render();
+}
+
+/** Single render: show exactly one stage, sync stepper, rails, and availability. */
+function render() {
+  for (const s of STAGES) $(`stage-${s}`).classList.toggle("hidden", s !== currentStage);
+  updateStepper();
+  updateRails();
+  updateAvailability();
+}
+
+function updateStepper() {
+  const group = currentStage === "codify" || currentStage === "deploy" ? "act" : currentStage;
+  for (const item of document.querySelectorAll("#stepper .stepper-item")) {
+    const s = item.dataset.stage;
+    item.classList.toggle("active", s === group);
+    // Review/Act are unreachable until a repo is analyzed.
+    item.disabled = (s === "review" || s === "act") && !current;
+  }
+}
+
+function updateRails() {
+  if (!current) return;
+  const p = current.plan;
+  const cost = p.budget ? `~$${p.budget.estimatedMonthlyUsd}/mo` : "cost n/a";
+  const html =
+    `<span class="rail-app">${esc(current.appName)}</span>` +
+    `<span class="rail-sep">·</span>${p.resources.length} resource(s)` +
+    `<span class="rail-sep">·</span>${esc(cost)}` +
+    `<span class="rail-sep">·</span>${esc(p.region)}`;
+  $("rail-codify").innerHTML = html;
+  $("rail-deploy").innerHTML = html;
 }
 
 function setDot(btnId, state) {
@@ -75,7 +147,7 @@ async function onAzureSignIn() {
     setDot("btn-azure", "in");
     $("btn-azure").lastChild.textContent = ` ${acct.username || "Signed in"}`;
     await populateSubscriptions();
-    refreshDeployAvailability();
+    render();
   } catch (err) {
     setDot("btn-azure", "out");
     alert(`Azure sign-in failed: ${err.message}`);
@@ -88,7 +160,7 @@ async function onGithubSignIn() {
     const user = await githubSignIn(cfg);
     setDot("btn-github", "in");
     $("btn-github").lastChild.textContent = ` ${user.login}`;
-    refreshShipAvailability();
+    render();
     loadRepoChoices();
   } catch (err) {
     setDot("btn-github", "out");
@@ -171,26 +243,58 @@ async function onAnalyze(ev) {
     status.textContent = `Scanned ${files.size} files${truncated ? " (truncated)" : ""}. Resolving plan…`;
 
     const result = resolveScan(repo, files);
-    current = { ...result, appName: repo };
-    renderResults(current);
+    current = { ...result, appName: repo, hosting: detectCurrentHosting(files) };
+    renderReview(current);
+    resetActionState(repo, result.plan);
 
     status.className = "status ok";
     status.textContent = `Done — ${result.plan.resources.length} Azure resource(s) planned for “${repo}”.`;
-
-    // Prime deploy defaults from the plan.
-    $("rg-input").value = `rg-${slug(repo)}`;
-    $("region-input").value = result.plan.region;
-    $("ship-repo-input").value = `${slug(repo)}-infra`;
-    setWhatIfOk(false);
-    $("results").classList.remove("hidden");
-    $("deploy").classList.remove("hidden");
-    $("ship").classList.remove("hidden");
-    refreshDeployAvailability();
-    refreshShipAvailability();
+    goToStage("review");
   } catch (err) {
     status.className = "status err";
     renderRepoError(status, err);
   }
+}
+
+/**
+ * Re-prime action inputs for a freshly analyzed repo. Clears both logs, resets
+ * the what-if gate, wipes the PG secret, and re-seeds rg/region/ship defaults —
+ * but only for fields the user hasn't hand-edited (tracked via `dirty`). A new
+ * analyze is a new plan, so we clear `dirty` first and let the plan re-seed.
+ */
+function resetActionState(repo, plan) {
+  dirty.rg = dirty.region = dirty.ship = false;
+  $("deploy-log").textContent = "";
+  $("ship-log").textContent = "";
+  const pg = $("pg-password");
+  if (pg) pg.value = "";
+  $("rg-input").value = `rg-${slug(repo)}`;
+  $("region-input").value = plan.region;
+  $("ship-repo-input").value = `${slug(repo)}-infra`;
+  whatIfOk = false;
+}
+
+/**
+ * Heuristic "this app already runs somewhere" detector over the fetched file
+ * map, used for the migration note. Returns human-readable host labels. Pure
+ * client-side lookup — no engine change needed.
+ */
+function detectCurrentHosting(files) {
+  const has = (p) => files.has(p);
+  const hasPrefix = (pre) => [...files.keys()].some((k) => k.startsWith(pre));
+  const hasBase = (name) => [...files.keys()].some((k) => k.split("/").pop() === name);
+  const labels = [];
+  if (hasBase("Dockerfile") || [...files.keys()].some((k) => k.split("/").pop().startsWith("Dockerfile")))
+    labels.push("a container image (Dockerfile)");
+  if (hasPrefix(".github/workflows/")) labels.push("GitHub Actions CI");
+  if (has("vercel.json")) labels.push("Vercel");
+  if (has("netlify.toml")) labels.push("Netlify");
+  if (has("Procfile") || has("app.json")) labels.push("Heroku");
+  if (has("fly.toml")) labels.push("Fly.io");
+  if (has("render.yaml")) labels.push("Render");
+  if (has("app.yaml")) labels.push("Google App Engine / App Platform");
+  if (has("azure.yaml") || has("azure.yml")) labels.push("Azure Developer CLI (azd)");
+  return labels;
 }
 
 /**
@@ -229,15 +333,37 @@ function renderRepoError(status, err) {
 // Rendering
 // --------------------------------------------------------------------------
 
-function renderResults(r) {
-  renderIntent(r.intent);
-  renderPlan(r.plan);
-  $("bicep-view").textContent = r.bicep;
+function renderReview(r) {
+  renderMigrationNote(r.hosting);
+  renderWhy(r.intent);
+  renderWhat(r.plan);
   renderScaffold(r.scaffold);
-  selectTab("intent");
+  $("land-count").textContent = String(r.scaffold.length);
+  $("bicep-view").textContent = r.bicep;
 }
 
-function renderIntent(intent) {
+function renderMigrationNote(hosting) {
+  const el = $("migration-note");
+  if (!hosting || hosting.length === 0) {
+    el.classList.add("hidden");
+    el.textContent = "";
+    return;
+  }
+  el.classList.remove("hidden");
+  el.textContent = "";
+  const strong = document.createElement("strong");
+  strong.textContent = "Heads up — this app already deploys somewhere. ";
+  el.append(strong);
+  el.append(
+    document.createTextNode(
+      `Signals detected: ${hosting.join(", ")}. Landing this infra points it at Azure ` +
+        "(Container Apps) instead, so treat it as a migration — review the plan before it goes live.",
+    ),
+  );
+}
+
+/** Consolidated "Why" — the app plus its inferred capability needs. */
+function renderWhy(intent) {
   const app = intent.app || {};
   const needs = intent.needs || [];
   const rows = needs
@@ -249,13 +375,14 @@ function renderIntent(intent) {
       </div>`;
     })
     .join("");
-  $("intent-view").innerHTML =
+  $("why-view").innerHTML =
     `<div class="card"><h3>${esc(app.name || "app")}</h3>
      <div class="hint">${esc(app.language || "")} ${esc(app.framework || "")}</div></div>` +
     (rows || `<p class="hint">No capabilities inferred.</p>`);
 }
 
-function renderPlan(plan) {
+/** Consolidated "What & cost" — the resources plus the budget summary. */
+function renderWhat(plan) {
   const summary = (plan.summary || []).map((s) => `<div>• ${esc(s)}</div>`).join("");
   const rows = plan.resources
     .map(
@@ -273,8 +400,10 @@ function renderPlan(plan) {
         plan.budget.blocked ? " · <strong>BLOCKED by guardrail</strong>" : ""
       }</div></div>`
     : "";
-  $("plan-view").innerHTML =
-    budget + `<div class="card"><h3>Summary</h3><div class="hint">${summary}</div></div>` + rows;
+  $("what-view").innerHTML =
+    budget +
+    (summary ? `<div class="card"><h3>Summary</h3><div class="hint">${summary}</div></div>` : "") +
+    rows;
 }
 
 function renderScaffold(files) {
@@ -291,12 +420,6 @@ function renderScaffold(files) {
       $("scaffold-file").textContent = f ? f.content : "";
     });
   }
-}
-
-function selectTab(name) {
-  for (const t of document.querySelectorAll(".tab")) t.classList.toggle("active", t.dataset.tab === name);
-  for (const p of document.querySelectorAll(".tabpanel"))
-    p.classList.toggle("active", p.dataset.panel === name);
 }
 
 // --------------------------------------------------------------------------
@@ -316,29 +439,77 @@ async function populateSubscriptions() {
   sel.disabled = subs.length === 0;
 }
 
-function refreshDeployAvailability() {
-  const ready = Boolean(current) && azureSignedIn() && $("sub-select").value;
-  $("btn-whatif").disabled = !ready;
-  $("btn-apply").disabled = !ready || !whatIfOk;
+/**
+ * Central availability + reason engine. Computes disabled state and the
+ * co-located "why" for both act spokes and the review chooser cards. Buttons
+ * that navigate stay enabled; only terminal actions gate on auth/inputs.
+ */
+function updateAvailability() {
+  // Codify path.
+  const codifyReason = !current
+    ? "Analyze a repo first."
+    : !githubSignedIn()
+      ? "Sign in with GitHub (top bar) to enable."
+      : "";
+  $("btn-ship").disabled = Boolean(codifyReason);
+  setReason("codify-reason", codifyReason, "review");
+  setReason("codify-reason-act", codifyReason, "act");
+
+  // Deploy path.
+  const subVal = $("sub-select").value;
+  const noSubs = azureSignedIn() && $("sub-select").options.length === 0;
+  const budgetBlocked = Boolean(current?.plan?.budget?.blocked);
+  let deployReason = "";
+  if (!current) deployReason = "Analyze a repo first.";
+  else if (!azureSignedIn()) deployReason = "Sign in with Azure (top bar) to enable.";
+  else if (noSubs) deployReason = "Signed in, but no Azure subscriptions were found on this account.";
+  else if (!subVal) deployReason = "Pick a subscription.";
+  else if (budgetBlocked) deployReason = "A guardrail blocks this plan's budget — deploy is disabled.";
+  setReason("deploy-reason", deployReason, "review");
+  setReason("deploy-reason-act", deployReason, "act");
+
+  const canWhatIf = Boolean(current) && azureSignedIn() && Boolean(subVal) && !budgetBlocked;
+  $("btn-whatif").disabled = !canWhatIf;
+  $("btn-apply").disabled = !canWhatIf || !whatIfOk;
+
+  // Show the PG password field only when the plan provisions Postgres.
+  const pgField = $("pg-field");
+  if (pgField) pgField.classList.toggle("hidden", !(current && planNeedsPgPassword(current.plan)));
 }
 
-function refreshShipAvailability() {
-  $("btn-ship").disabled = !(current && githubSignedIn());
+/**
+ * Fill a reason element. `scope` "review" hides the note when empty (the card's
+ * static hint already explains the happy path); "act" shows a positive "Ready"
+ * so the user isn't left wondering.
+ */
+function setReason(id, msg, scope) {
+  const el = $(id);
+  if (!el) return;
+  if (msg) {
+    el.textContent = msg;
+    el.classList.remove("hidden", "ok");
+    el.classList.add("warn");
+  } else if (scope === "act") {
+    el.textContent = "Ready.";
+    el.classList.remove("hidden", "warn");
+    el.classList.add("ok");
+  } else {
+    el.textContent = "";
+    el.classList.add("hidden");
+  }
 }
 
 function setWhatIfOk(ok) {
   whatIfOk = ok;
-  refreshDeployAvailability();
+  updateAvailability();
 }
 
-/** Collect deploy parameters, prompting for the PG password when the plan needs it. */
+/** Collect deploy parameters, reading the masked PG password field once. */
 function deployParameters() {
   const params = {};
   if (planNeedsPgPassword(current.plan)) {
-    const pw = window.prompt(
-      "This plan provisions PostgreSQL. Enter an administrator password (@secure — not stored):",
-    );
-    if (!pw) throw new Error("PostgreSQL admin password is required to deploy this plan.");
+    const pw = $("pg-password").value;
+    if (!pw) throw new Error("Enter the PostgreSQL admin password (field above) to deploy this plan.");
     params.postgresAdminPassword = pw;
   }
   return params;
@@ -395,9 +566,27 @@ async function onApply() {
   if (!whatIfOk) return;
   const log = $("deploy-log");
   const write = (m) => (log.textContent += m + "\n");
-  if (!window.confirm("Deploy real Azure resources now? This will incur cost.")) return;
+  let inputs;
   try {
-    const { subscriptionId, resourceGroup, region } = deployInputs();
+    inputs = deployInputs();
+  } catch (err) {
+    write(`\n✖ ${err.message}`);
+    return;
+  }
+  const sel = $("sub-select");
+  const subName = sel.options[sel.selectedIndex]?.textContent || inputs.subscriptionId;
+  const count = current.plan.resources.length;
+  const cost = current.plan.budget ? `~$${current.plan.budget.estimatedMonthlyUsd}/mo` : "unknown cost";
+  const confirmed = window.confirm(
+    `Deploy ${count} resource(s) to:\n` +
+      `  subscription: ${subName}\n` +
+      `  resource group: ${inputs.resourceGroup} (${inputs.region})\n` +
+      `  estimated: ${cost}\n\n` +
+      "This creates real Azure resources and will incur cost. Continue?",
+  );
+  if (!confirmed) return;
+  try {
+    const { subscriptionId, resourceGroup, region } = inputs;
     const params = deployParameters();
     const template = generateArmTemplate(current.plan);
     write("\n▶ Deploying (creating resources)…");
@@ -432,15 +621,17 @@ async function onShip() {
     if (!name) throw new Error("Enter a name for the new repo.");
     const isPrivate = $("ship-private").checked;
     const files = current.scaffold.map((f) => ({ path: f.path, contents: f.content }));
-    write(`▶ Creating ${isPrivate ? "private " : ""}repo “${name}” and pushing ${files.length} files…`);
+    write(`▶ Creating ${isPrivate ? "private " : ""}repo “${name}”, committing ${files.length} files, and opening a PR…`);
     const res = await createRepoAndPush(
       name,
       isPrivate,
       files,
       `azx: infra scaffold for ${current.appName}`,
     );
-    write(`\n✔ Pushed to ${res.htmlUrl}`);
-    write("  Next: add AZURE_CLIENT_ID / TENANT_ID / SUBSCRIPTION_ID repo variables and");
+    write(`\n✔ Repo created: ${res.htmlUrl}`);
+    write(`✔ Pull request opened: ${res.prUrl}`);
+    write(`\n  Review the PR, then merge to land the infra on ${res.base}.`);
+    write("  After merging: add AZURE_CLIENT_ID / TENANT_ID / SUBSCRIPTION_ID repo variables and");
     write("  run setup-azure-oidc.sh so the committed pipeline can deploy via OIDC.");
   } catch (err) {
     write(`\n✖ ${err.message}`);
