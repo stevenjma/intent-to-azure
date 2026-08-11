@@ -128,7 +128,7 @@ export function githubSignIn(config) {
     const loginUrl =
       `${config.githubWorkerUrl.replace(/\/$/, "")}/login` +
       `?state=${encodeURIComponent(state)}` +
-      `&scope=${encodeURIComponent(config.githubScopes || "repo read:user")}`;
+      `&scope=${encodeURIComponent(config.githubScopes || "repo workflow read:user")}`;
 
     const popup = window.open(loginUrl, "azx-github-oauth", "width=560,height=720");
     if (!popup) {

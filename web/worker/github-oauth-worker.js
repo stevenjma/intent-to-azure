@@ -25,7 +25,7 @@ export default {
 
     if (url.pathname === "/login") {
       const state = url.searchParams.get("state") || "";
-      const scope = url.searchParams.get("scope") || "repo read:user";
+      const scope = url.searchParams.get("scope") || "repo workflow read:user";
       const redirectUri = `${url.origin}/callback`;
       const gh = new URL("https://github.com/login/oauth/authorize");
       gh.searchParams.set("client_id", env.GITHUB_CLIENT_ID);

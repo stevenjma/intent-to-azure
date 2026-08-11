@@ -60,7 +60,7 @@ jobs:
             azureTenant: "${AZURE_TENANT:-common}",
             githubClientId: "${GH_OAUTH_CLIENT_ID}",
             githubWorkerUrl: "${GH_WORKER_URL}",
-            githubScopes: "repo read:user",
+            githubScopes: "repo workflow read:user",
           };
           EOF
             echo "Generated web/config.js from repo Variables."
