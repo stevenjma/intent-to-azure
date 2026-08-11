@@ -38,6 +38,10 @@ window.AZX_CONFIG = {
    */
   githubWorkerUrl: "",
 
-  /** OAuth scopes requested from GitHub. `repo` is needed to create + push a repo. */
-  githubScopes: "repo read:user",
+  /**
+   * OAuth scopes requested from GitHub. `repo` is needed to create + push a repo;
+   * `workflow` is required to write the generated `.github/workflows/deploy.yml`
+   * pipeline (GitHub rejects workflow-file writes without it).
+   */
+  githubScopes: "repo workflow read:user",
 };
