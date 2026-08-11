@@ -9,8 +9,8 @@
  * Repo read: enumerate the git tree, pull text blobs into a Map<path, contents> —
  * the exact shape the browser engine's scanFileMap() consumes.
  *
- * Repo write (ship): create a repo, then the git-data dance (blobs → tree → commit →
- * ref) to push the generated scaffold in one commit. No local git.
+ * Repo write (ship): create a repo, seed it through the Contents API, create a
+ * feature ref, then add each scaffold file through the Contents API. No local git.
  */
 
 const API = "https://api.github.com";
@@ -41,6 +41,12 @@ export function githubUser() {
 }
 export function githubSignedIn() {
   return token != null;
+}
+
+/** Inject auth for Node-based live repros without duplicating the shipped flow. */
+export function __setAuth(authToken, authUser) {
+  token = authToken;
+  user = authUser;
 }
 
 function ext(path) {
@@ -264,20 +270,56 @@ function encodeBase64Utf8(str) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * POST a git-data write, retrying while a just-created repo's git backend is
- * still provisioning. Fresh repos briefly reject write endpoints with 404 (ref
- * not found) or 409 ("Git Repository is empty") until the backend is ready; a
- * few short retries ride that out. Other errors surface immediately.
+ * Retry an operation while a just-created repo's git backend provisions.
+ * Fresh repos can return 404 or 409 for tens of seconds after a successful
+ * Contents API seed, so use bounded exponential backoff instead of a short
+ * fixed-delay window. Other errors surface immediately.
  */
-async function gitWrite(path, body) {
+async function provisioningRetry(operation) {
   let lastErr;
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 8; i++) {
     try {
-      return await gh(path, { method: "POST", body });
+      return await operation();
     } catch (err) {
       lastErr = err;
       if (err.status && err.status !== 404 && err.status !== 409) throw err;
-      await sleep(600);
+      if (i < 7) await sleep(Math.min(500 * 2 ** i, 8_000));
+    }
+  }
+  throw lastErr;
+}
+
+async function gitWrite(path, body, method = "POST") {
+  return provisioningRetry(() => gh(path, { method, body }));
+}
+
+async function createOrResetBranch(repoPath, branch, sha) {
+  let lastErr;
+  for (let i = 0; i < 8; i++) {
+    try {
+      await gh(`${repoPath}/git/refs`, {
+        method: "POST",
+        body: { ref: `refs/heads/${branch}`, sha },
+      });
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (err.status === 422) {
+        try {
+          await gh(`${repoPath}/git/ref/heads/${branch}`);
+          await gitWrite(
+            `${repoPath}/git/refs/heads/${branch}`,
+            { sha, force: true },
+            "PATCH",
+          );
+          return;
+        } catch (refErr) {
+          if (refErr.status && refErr.status !== 404 && refErr.status !== 409) throw refErr;
+        }
+      } else if (err.status && err.status !== 404 && err.status !== 409) {
+        throw err;
+      }
+      if (i < 7) await sleep(Math.min(500 * 2 ** i, 8_000));
     }
   }
   throw lastErr;
@@ -290,17 +332,11 @@ async function gitWrite(path, body) {
  * "Git Repository is empty" 409 you hit writing blobs/trees to an unborn repo.
  */
 async function contentsPut(path, body) {
-  let lastErr;
-  for (let i = 0; i < 6; i++) {
-    try {
-      return await gh(path, { method: "PUT", body });
-    } catch (err) {
-      lastErr = err;
-      if (err.status && err.status !== 404 && err.status !== 409) throw err;
-      await sleep(600);
-    }
-  }
-  throw lastErr;
+  return provisioningRetry(() => gh(path, { method: "PUT", body }));
+}
+
+function encodeRepoPath(path) {
+  return String(path).split("/").filter(Boolean).map(encodeURIComponent).join("/");
 }
 
 /**
@@ -315,11 +351,11 @@ async function contentsPut(path, body) {
  * API response (not the raw input), so a sanitized name or org owner can't
  * produce a 404 against the wrong path.
  *
- * We deliberately do NOT use `auto_init`. Instead we seed the base branch's
- * initial commit via the Contents API (the documented, reliable way to write the
- * first commit into an empty repo), then layer the scaffold branch with git-data
- * — avoiding both the auto_init replication race and the "Git Repository is
- * empty" 409 that git-data writes hit on an unborn repo.
+ * We deliberately do NOT use `auto_init`. The base commit and every scaffold
+ * file are written through the Contents API, avoiding the independently
+ * replicated git-data blob/tree/commit endpoints that can still report an empty
+ * repository after the seed commit succeeds. Git-data is used only to create or
+ * reset the feature branch ref, with exponential retry while it becomes visible.
  *
  * The whole flow is idempotent: a prior failed run can leave behind an empty
  * repo the SPA can't delete (no `delete_repo` scope), so on a name-conflict 422
@@ -368,9 +404,6 @@ export async function createRepoAndPush(repoName, isPrivate, scaffoldFiles, comm
   const base = repo.default_branch || "main";
   const R = `/repos/${owner}/${name}`;
 
-  const blobSha = (contents) =>
-    gitWrite(`${R}/git/blobs`, { content: contents, encoding: "utf-8" }).then((b) => b.sha);
-
   // 1. Base branch: ensure the default branch has an initial commit. Reuse it if
   //    a prior run already seeded it; otherwise create it via the Contents API —
   //    the reliable way to write the first commit into an empty repo (branch +
@@ -384,38 +417,47 @@ export async function createRepoAndPush(repoName, isPrivate, scaffoldFiles, comm
   }
   if (!baseCommitSha) {
     const readme = `# ${name}\n\nAzure infrastructure generated by azx.\n`;
-    const seed = await contentsPut(`${R}/contents/README.md`, {
-      message: "azx: initialize repository",
-      content: encodeBase64Utf8(readme),
-      branch: base,
-    });
-    baseCommitSha = seed.commit.sha;
+    try {
+      const seed = await contentsPut(`${R}/contents/README.md`, {
+        message: "azx: initialize repository",
+        content: encodeBase64Utf8(readme),
+        branch: base,
+      });
+      baseCommitSha = seed.commit.sha;
+    } catch (err) {
+      if (err.status !== 422) throw err;
+      // A rapid retry can observe the seed file before the git ref. Wait for
+      // the already-created base ref rather than treating the conflict as fatal.
+      const ref = await provisioningRetry(() => gh(`${R}/git/ref/heads/${base}`));
+      baseCommitSha = ref.object.sha;
+    }
   }
-  // The repo now has a git backend, so read the base tree via git-data.
-  const baseCommitObj = await gh(`${R}/git/commits/${baseCommitSha}`);
-  const baseTreeSha = baseCommitObj.tree.sha;
 
-  // 2. Feature branch: the scaffold layered on the base commit → refs/heads/azx-infra.
-  const treeItems = [];
-  for (const f of scaffoldFiles) {
-    treeItems.push({ path: f.path, mode: "100644", type: "blob", sha: await blobSha(f.contents) });
-  }
-  const tree = await gitWrite(`${R}/git/trees`, { base_tree: baseTreeSha, tree: treeItems });
-  const commit = await gitWrite(`${R}/git/commits`, {
-    message: commitMessage || "azx: infra scaffold",
-    tree: tree.sha,
-    parents: [baseCommitSha],
-  });
+  // 2. Feature branch: create it from the base commit, or reset an existing
+  //    branch so a retried Codify run produces exactly the requested scaffold.
   const branch = "azx-infra";
-  // Create the branch ref, or fast-update it if a prior run already made it.
-  try {
-    await gitWrite(`${R}/git/refs`, { ref: `refs/heads/${branch}`, sha: commit.sha });
-  } catch (err) {
-    if (err.status !== 422) throw err; // 422 = ref already exists.
-    await gh(`${R}/git/refs/heads/${branch}`, {
-      method: "PATCH",
-      body: { sha: commit.sha, force: true },
-    });
+  await createOrResetBranch(R, branch, baseCommitSha);
+
+  // Write files sequentially because each Contents API call advances the branch.
+  // If a scaffold path already exists on the base branch, GitHub requires its
+  // blob SHA to update it rather than create it.
+  for (const f of scaffoldFiles) {
+    const contentPath = `${R}/contents/${encodeRepoPath(f.path)}`;
+    const body = {
+      message: commitMessage || "azx: infra scaffold",
+      content: encodeBase64Utf8(f.contents),
+      branch,
+    };
+    try {
+      await contentsPut(contentPath, body);
+    } catch (err) {
+      if (err.status !== 422) throw err;
+      const existing = await provisioningRetry(() =>
+        gh(`${contentPath}?ref=${encodeURIComponent(branch)}`),
+      ).catch(() => null);
+      if (!existing || !existing.sha) throw err;
+      await contentsPut(contentPath, { ...body, sha: existing.sha });
+    }
   }
 
   // 3. Open the PR into the default branch — or reuse an open one from a prior run.
