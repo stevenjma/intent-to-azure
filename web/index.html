@@ -57,8 +57,24 @@
         client ID, and Worker URL. See <code>web/README.md</code>.
       </section>
 
-      <section class="step">
-        <h2>1 · Point at a GitHub repo</h2>
+      <!-- Skip-to stepper. Source › Review › Act. Reachable once a repo is analyzed. -->
+      <nav id="stepper" class="stepper" aria-label="Progress">
+        <button class="stepper-item" data-stage="source" type="button">
+          <span class="stepper-num">1</span> Source
+        </button>
+        <span class="stepper-sep">›</span>
+        <button class="stepper-item" data-stage="review" type="button" disabled>
+          <span class="stepper-num">2</span> Review
+        </button>
+        <span class="stepper-sep">›</span>
+        <button class="stepper-item" data-stage="act" type="button" disabled>
+          <span class="stepper-num">3</span> Act
+        </button>
+      </nav>
+
+      <!-- STAGE: source -->
+      <section id="stage-source" class="stage">
+        <h2>Point at a GitHub repo</h2>
         <p class="hint">
           Reads the repo's files in your browser via the GitHub API and infers what
           Azure it needs. Nothing is sent anywhere except GitHub and (on deploy) Azure.
@@ -85,23 +101,92 @@
         <p id="repo-status" class="status" role="status"></p>
       </section>
 
-      <section id="results" class="results hidden">
-        <div class="tabs" role="tablist">
-          <button class="tab active" data-tab="intent" role="tab">Intent</button>
-          <button class="tab" data-tab="plan" role="tab">Plan</button>
-          <button class="tab" data-tab="bicep" role="tab">Bicep</button>
-          <button class="tab" data-tab="scaffold" role="tab">Scaffold</button>
+      <!-- STAGE: review (hub / checkpoint) -->
+      <section id="stage-review" class="stage hidden">
+        <h2>Review the plan</h2>
+        <p class="hint">
+          Here's what azx inferred and what it will create in Azure. Review it, then
+          choose how to proceed — nothing has been created yet.
+        </p>
+
+        <div id="migration-note" class="note hidden"></div>
+
+        <div class="review-grid">
+          <div class="review-col">
+            <h3>Why — inferred needs</h3>
+            <div id="why-view"></div>
+          </div>
+          <div class="review-col">
+            <h3>What &amp; cost</h3>
+            <div id="what-view"></div>
+          </div>
         </div>
-        <div class="tabpanels">
-          <div class="tabpanel active" data-panel="intent"><div id="intent-view"></div></div>
-          <div class="tabpanel" data-panel="plan"><div id="plan-view"></div></div>
-          <div class="tabpanel" data-panel="bicep"><pre id="bicep-view" class="code"></pre></div>
-          <div class="tabpanel" data-panel="scaffold"><div id="scaffold-view"></div></div>
+
+        <details class="disclose">
+          <summary>What will land — infra files (<span id="land-count">0</span>)</summary>
+          <div id="scaffold-view"></div>
+        </details>
+        <details class="disclose">
+          <summary>Generated Bicep</summary>
+          <pre id="bicep-view" class="code"></pre>
+        </details>
+
+        <h3 class="actions-head">Proceed</h3>
+        <div class="actions">
+          <div class="action-card primary">
+            <h4>Create infra repo &amp; open PR</h4>
+            <p class="hint">
+              Lands the Bicep + OIDC pipeline in a new GitHub repo as a pull request you
+              can review before merging. This is the repeatable path.
+            </p>
+            <div id="codify-reason" class="reason hidden"></div>
+            <button id="go-codify" class="btn" type="button">Set up repo →</button>
+          </div>
+          <div class="action-card">
+            <h4>Preview on Azure (what-if)</h4>
+            <p class="hint">
+              Runs a real ARM what-if against your subscription, then optionally deploys
+              now — a live, disposable preview.
+            </p>
+            <div id="deploy-reason" class="reason hidden"></div>
+            <button id="go-deploy" class="btn" type="button">Preview &amp; deploy →</button>
+          </div>
         </div>
       </section>
 
-      <section id="deploy" class="step hidden">
-        <h2>2 · Deploy to Azure</h2>
+      <!-- STAGE: codify -->
+      <section id="stage-codify" class="stage hidden">
+        <button class="back" data-stage="review" type="button">← Back to review</button>
+        <div id="rail-codify" class="rail"></div>
+        <h2>Codify as a repo</h2>
+        <p class="hint">
+          Creates a new GitHub repo, commits the generated Bicep + OIDC pipeline to an
+          <code>azx-infra</code> branch, and opens a pull request into the default branch
+          so you can review before it lands. Requires GitHub sign-in.
+        </p>
+        <div class="deploy-controls">
+          <label>
+            New repo
+            <input id="ship-repo-input" type="text" placeholder="my-app-infra" />
+          </label>
+          <label class="checkbox">
+            <input id="ship-private" type="checkbox" checked /> Private
+          </label>
+        </div>
+        <div id="codify-reason-act" class="reason hidden"></div>
+        <div class="deploy-actions">
+          <button id="btn-ship" class="btn" type="button" disabled>
+            Create repo &amp; open PR
+          </button>
+        </div>
+        <pre id="ship-log" class="code log"></pre>
+      </section>
+
+      <!-- STAGE: deploy -->
+      <section id="stage-deploy" class="stage hidden">
+        <button class="back" data-stage="review" type="button">← Back to review</button>
+        <div id="rail-deploy" class="rail"></div>
+        <h2>Deploy to Azure</h2>
         <p class="hint">
           Runs a real ARM <strong>what-if</strong> preview first (always), then deploys
           only after you review and confirm. Requires Azure sign-in.
@@ -119,7 +204,12 @@
             Region
             <input id="region-input" type="text" placeholder="eastus2" />
           </label>
+          <label id="pg-field" class="hidden">
+            PostgreSQL admin password
+            <input id="pg-password" type="password" autocomplete="new-password" placeholder="@secure — not stored" />
+          </label>
         </div>
+        <div id="deploy-reason-act" class="reason hidden"></div>
         <div class="deploy-actions">
           <button id="btn-whatif" class="btn" type="button" disabled>Run what-if</button>
           <button id="btn-apply" class="btn btn-danger" type="button" disabled>
@@ -127,27 +217,6 @@
           </button>
         </div>
         <pre id="deploy-log" class="code log"></pre>
-      </section>
-
-      <section id="ship" class="step hidden">
-        <h2>3 · Codify as a repo (optional)</h2>
-        <p class="hint">
-          Creates a new GitHub repo and pushes the generated Bicep + OIDC pipeline, so
-          future deploys run through GitHub Actions. Requires GitHub sign-in.
-        </p>
-        <div class="deploy-controls">
-          <label>
-            New repo
-            <input id="ship-repo-input" type="text" placeholder="my-app-infra" />
-          </label>
-          <label class="checkbox">
-            <input id="ship-private" type="checkbox" checked /> Private
-          </label>
-        </div>
-        <div class="deploy-actions">
-          <button id="btn-ship" class="btn" type="button" disabled>Create repo &amp; push</button>
-        </div>
-        <pre id="ship-log" class="code log"></pre>
       </section>
     </main>
 
