@@ -277,22 +277,43 @@ async function headShaWithRetry(owner, name, branch) {
 }
 
 /**
- * Create a new repo under the signed-in user, commit `scaffoldFiles`
- * ([{ path, contents }]) onto an `azx-infra` branch, and open a pull request
- * into the repo's default branch so the infra is reviewable before it lands.
+ * Create a new repo and commit `scaffoldFiles` ([{ path, contents }]) onto an
+ * `azx-infra` branch, then open a pull request into the repo's default branch so
+ * the infra is reviewable before it lands.
+ *
+ * `repoName` may be either a bare `name` (created under the signed-in user) or an
+ * `owner/name` where `owner` is a GitHub organization you can create repos in —
+ * this is how you land the infra in an org path rather than your personal
+ * account. Every git-data call uses the *created repo's* real owner/name from the
+ * API response (not the raw input), so a sanitized name or org owner can't
+ * produce a 404 against the wrong path.
+ *
  * Returns { htmlUrl, prUrl, owner, name, branch, base, login }.
  */
-export async function createRepoAndPush(name, isPrivate, scaffoldFiles, commitMessage) {
+export async function createRepoAndPush(repoName, isPrivate, scaffoldFiles, commitMessage) {
   if (!token) throw new Error("Sign in with GitHub first.");
   const me = user || (await gh("/user"));
 
+  // Split an optional `owner/` prefix. An owner that isn't the signed-in user is
+  // treated as an organization and created via the orgs endpoint.
+  const parts = String(repoName).split("/").map((s) => s.trim()).filter(Boolean);
+  const rawName = parts.length > 1 ? parts[parts.length - 1] : parts[0];
+  const targetOwner = parts.length > 1 ? parts[0] : null;
+  if (!rawName) throw new Error("Enter a name for the new repo.");
+
   // auto_init gives us a real initial commit + default branch to branch off and
   // target a PR against (a PR needs two branches; an empty repo has neither).
-  const repo = await gh("/user/repos", {
+  const createPath =
+    targetOwner && targetOwner.toLowerCase() !== me.login.toLowerCase()
+      ? `/orgs/${targetOwner}/repos`
+      : "/user/repos";
+  const repo = await gh(createPath, {
     method: "POST",
-    body: { name, private: Boolean(isPrivate), auto_init: true },
+    body: { name: rawName, private: Boolean(isPrivate), auto_init: true },
   });
+  // Always follow up against the repo's REAL owner/name, never the raw input.
   const owner = repo.owner.login;
+  const name = repo.name;
   const base = repo.default_branch || "main";
 
   const headSha = await headShaWithRetry(owner, name, base);

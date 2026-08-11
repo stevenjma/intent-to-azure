@@ -238,14 +238,14 @@ async function onAnalyze(ev) {
   status.className = "status";
   status.textContent = "Fetching repo files…";
   try {
-    const { repo, files, truncated } = await fetchRepoFiles(ownerRepo, ref);
+    const { owner, repo, files, truncated } = await fetchRepoFiles(ownerRepo, ref);
     if (files.size === 0) throw new Error("No readable text files found in that repo/branch.");
     status.textContent = `Scanned ${files.size} files${truncated ? " (truncated)" : ""}. Resolving plan…`;
 
     const result = resolveScan(repo, files);
-    current = { ...result, appName: repo, hosting: detectCurrentHosting(files) };
+    current = { ...result, appName: repo, owner, hosting: detectCurrentHosting(files) };
     renderReview(current);
-    resetActionState(repo, result.plan);
+    resetActionState(owner, repo, result.plan);
 
     status.className = "status ok";
     status.textContent = `Done — ${result.plan.resources.length} Azure resource(s) planned for “${repo}”.`;
@@ -262,7 +262,7 @@ async function onAnalyze(ev) {
  * but only for fields the user hasn't hand-edited (tracked via `dirty`). A new
  * analyze is a new plan, so we clear `dirty` first and let the plan re-seed.
  */
-function resetActionState(repo, plan) {
+function resetActionState(owner, repo, plan) {
   dirty.rg = dirty.region = dirty.ship = false;
   $("deploy-log").textContent = "";
   $("ship-log").textContent = "";
@@ -270,7 +270,10 @@ function resetActionState(repo, plan) {
   if (pg) pg.value = "";
   $("rg-input").value = `rg-${slug(repo)}`;
   $("region-input").value = plan.region;
-  $("ship-repo-input").value = `${slug(repo)}-infra`;
+  // Default the new-repo name to the SOURCE repo's owner path, so an org-owned
+  // app lands its infra in the same org (e.g. `my-org/app-infra`) rather than
+  // silently under the signed-in personal account. Users can edit it.
+  $("ship-repo-input").value = owner ? `${owner}/${slug(repo)}-infra` : `${slug(repo)}-infra`;
   whatIfOk = false;
 }
 
