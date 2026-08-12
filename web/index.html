@@ -7,8 +7,9 @@
       Strict CSP. The SPA holds live ARM + GitHub tokens in memory, so XSS is the
       crown-jewel risk (the shell/argv threats from the CLI don't exist in a browser).
       No inline scripts (all logic is external ES modules); scripts only from self +
-      esm.sh (MSAL). connect-src is pinned to Azure/GitHub + common Worker hosts — if
-      your token-exchange Worker is on another origin, add it here (see web/README.md).
+      esm.sh (MSAL). connect-src is pinned to the only origins the SPA actually fetches
+      (Azure ARM + GitHub API + esm.sh). The token-exchange Worker is NOT fetched — it's
+      reached via window.open + postMessage — so a custom-domain Worker needs no CSP edit.
     -->
     <meta
       http-equiv="Content-Security-Policy"
@@ -23,9 +24,7 @@
           https://management.azure.com
           https://api.github.com
           https://github.com
-          https://esm.sh
-          https://*.workers.dev
-          https://*.azurewebsites.net;
+          https://esm.sh;
         frame-src https://login.microsoftonline.com;
         base-uri 'none';
         form-action 'none';
@@ -57,6 +56,8 @@
         client ID, and Worker URL. See <code>web/README.md</code>.
       </section>
 
+      <!-- Auth notices (e.g. admin-consent deep link when a tenant gates the app). -->
+      <section id="auth-notice" class="banner hidden"></section>
       <!-- Skip-to stepper. Source › Review › Act. Reachable once a repo is analyzed. -->
       <nav id="stepper" class="stepper" aria-label="Progress">
         <button class="stepper-item" data-stage="source" type="button">

@@ -49,8 +49,22 @@ const dirty = { rg: false, region: false, ship: false };
 // --------------------------------------------------------------------------
 
 function boot() {
-  const missing = !cfg.azureClientId || !cfg.githubClientId || !cfg.githubWorkerUrl;
-  if (missing) $("setup-banner").classList.remove("hidden");
+  // Name every required identifier so the setup banner can say exactly what's
+  // missing (self-host forkers hit partial-config states otherwise — DR-010).
+  const REQUIRED = [
+    ["azureClientId", "Entra SPA client ID (azureClientId)"],
+    ["githubClientId", "GitHub OAuth App client ID (githubClientId)"],
+    ["githubWorkerUrl", "token-exchange Worker URL (githubWorkerUrl)"],
+  ];
+  const missing = REQUIRED.filter(([key]) => !cfg[key]);
+  if (missing.length) {
+    const banner = $("setup-banner");
+    banner.classList.remove("hidden");
+    const list = document.createElement("p");
+    list.className = "banner-missing";
+    list.textContent = "Missing: " + missing.map(([, label]) => label).join(", ") + ".";
+    banner.appendChild(list);
+  }
 
   $("btn-azure").addEventListener("click", onAzureSignIn);
   $("btn-github").addEventListener("click", onGithubSignIn);
@@ -146,12 +160,56 @@ async function onAzureSignIn() {
     const acct = await azureSignIn(cfg);
     setDot("btn-azure", "in");
     $("btn-azure").lastChild.textContent = ` ${acct.username || "Signed in"}`;
+    clearAuthNotice();
     await populateSubscriptions();
     render();
   } catch (err) {
     setDot("btn-azure", "out");
-    alert(`Azure sign-in failed: ${err.message}`);
+    renderAzureError(err);
   }
+}
+
+function clearAuthNotice() {
+  const el = $("auth-notice");
+  el.classList.add("hidden");
+  el.textContent = "";
+}
+
+/**
+ * Render an Azure sign-in error into the auth-notice banner. When the tenant
+ * gates the app behind admin approval (err.adminConsent), surface a one-click
+ * admin-consent deep link instead of a dead-end alert. The URL is built by
+ * azure.js from our own public client id + origin; nodes use the DOM API so no
+ * user-controlled text is ever interpolated into HTML.
+ */
+function renderAzureError(err) {
+  const el = $("auth-notice");
+  el.classList.remove("hidden");
+  el.textContent = "";
+  const ac = err.adminConsent;
+  if (!ac) {
+    el.textContent = `Azure sign-in failed: ${err.message}`;
+    return;
+  }
+  const strong = document.createElement("strong");
+  strong.textContent = "Admin approval needed. ";
+  el.append(strong);
+  el.append(
+    document.createTextNode(
+      "Your organization requires an administrator to approve this app before you can sign in. Send an admin this one-click approval link: ",
+    ),
+  );
+  const a = document.createElement("a");
+  a.href = ac.url;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.textContent = "Grant admin consent for your tenant ↗";
+  el.append(a);
+  el.append(
+    document.createTextNode(
+      " An admin approves once for the whole tenant; after that, sign in again here.",
+    ),
+  );
 }
 
 async function onGithubSignIn() {
@@ -637,7 +695,27 @@ async function onShip() {
     write("  After merging: add AZURE_CLIENT_ID / TENANT_ID / SUBSCRIPTION_ID repo variables and");
     write("  run setup-azure-oidc.sh so the committed pipeline can deploy via OIDC.");
   } catch (err) {
-    write(`\n✖ ${err.message}`);
+    const r = err.orgRestriction;
+    if (r) {
+      log.append(
+        document.createTextNode(
+          `\n✖ The “${r.org}” org restricts third-party OAuth Apps, so this app can't create the repo there yet. An org owner can grant access here: `,
+        ),
+      );
+      const a = document.createElement("a");
+      a.href = r.grantUrl;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = `Grant this app access to ${r.org} ↗`;
+      log.append(a);
+      log.append(
+        document.createTextNode(
+          " After granting, sign out and sign back in with GitHub, then retry.\n",
+        ),
+      );
+    } else {
+      write(`\n✖ ${err.message}`);
+    }
   }
 }
 
