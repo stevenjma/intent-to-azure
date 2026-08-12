@@ -2,10 +2,11 @@
  * azure.js — Azure sign-in (MSAL PKCE) + real ARM REST deploy for the SPA.
  *
  * Entra is SPA-native and ARM sends CORS headers, so everything here is 100%
- * client-side: no backend, no secret. We loginPopup, acquire an ARM token
- * (https://management.azure.com/.default), and drive resource-group ensure →
- * what-if (always, as a gate) → deployment create over fetch. The token lives in
- * MSAL's in-memory cache only.
+ * client-side: no backend, no secret. Sign-in is two steps: an identity-only
+ * loginPopup (so personal accounts aren't blocked by ARM resource discovery),
+ * then an ARM token acquisition (https://management.azure.com/user_impersonation)
+ * that drives resource-group ensure → what-if (always, as a gate) → deployment
+ * create over fetch. The token lives in MSAL's in-memory cache only.
  *
  * MSAL is loaded from a CDN as an ES module (see the CSP in index.html).
  */
@@ -16,6 +17,19 @@ const ARM = "https://management.azure.com";
 const ARM_SCOPE = "https://management.azure.com/user_impersonation";
 const RG_API = "2021-04-01";
 const DEPLOY_API = "2021-04-01";
+
+/**
+ * Well-known tenant id of the Microsoft consumer (personal-account) directory.
+ * Any account whose home tenant is this GUID is a pure personal Microsoft
+ * account with no Azure AD directory — Azure Resource Manager does not exist for
+ * it, so it can never mint an ARM token no matter what we request.
+ */
+const MSA_CONSUMER_TENANT = "9188040d-6c67-4c5b-b112-36a304b66dad";
+
+/** Identity-only scopes: pure OIDC, no Azure resource, so Entra never runs
+ * resource-based home-realm-discovery and never blocks a personal account
+ * inside the popup. We resolve ARM access as a separate, catchable step. */
+const LOGIN_SCOPES = ["openid", "profile"];
 
 /** Where to send an account that has no Azure subscription yet. */
 export const AZURE_SIGNUP_URL = "https://azure.microsoft.com/free/";
@@ -90,22 +104,61 @@ function isNoAzureAccessError(err) {
   return /AADSTS500011|AADSTS650052|AADSTS50020/.test(text);
 }
 
-/** Interactive sign-in; resolves the signed-in account. */
+/**
+ * Is this signed-in account a pure personal Microsoft account (living in the
+ * well-known consumer tenant)? Such accounts have no Azure AD directory, so ARM
+ * is unreachable for them. We detect this from the id-token claims BEFORE
+ * requesting any ARM scope — requesting ARM for a personal account triggers
+ * Entra's "you can't sign in here with a personal account" wall inside the
+ * popup, which our code can't catch. Detecting up front lets us show friendly
+ * signup guidance instead.
+ */
+function isConsumerAccount(acct) {
+  const tid = `${acct?.tenantId || acct?.idTokenClaims?.tid || ""}`.toLowerCase();
+  return tid === MSA_CONSUMER_TENANT;
+}
+
+/**
+ * Interactive sign-in; resolves the signed-in account and proves ARM is
+ * reachable. Two steps on purpose:
+ *   1. loginPopup with identity-only scopes — no Azure resource, so a personal
+ *      account authenticates cleanly instead of hitting the Microsoft wall.
+ *   2. If the account is a personal (consumer) account, surface friendly Azure
+ *      signup guidance without ever requesting ARM. Otherwise acquire an ARM
+ *      token now so real deploy calls have one and any no-Azure / admin-consent
+ *      problem surfaces here with our catchable handling.
+ */
 export async function azureSignIn(config) {
   const app = await ensureMsal(config);
+  let res;
   try {
-    const res = await app.loginPopup({ scopes: [ARM_SCOPE] });
-    account = res.account;
-    app.setActiveAccount(account);
-    return account;
+    res = await app.loginPopup({ scopes: LOGIN_SCOPES });
   } catch (err) {
-    if (isNoAzureAccessError(err)) {
-      err.needsAzureSignup = { signupUrl: AZURE_SIGNUP_URL };
-    } else if (isAdminConsentError(err)) {
-      err.adminConsent = { url: adminConsentUrl(config) };
-    }
+    if (isAdminConsentError(err)) err.adminConsent = { url: adminConsentUrl(config) };
+    else if (isNoAzureAccessError(err)) err.needsAzureSignup = { signupUrl: AZURE_SIGNUP_URL };
     throw err;
   }
+  account = res.account;
+  app.setActiveAccount(account);
+
+  if (isConsumerAccount(account)) {
+    account = null;
+    const err = new Error(
+      "This personal Microsoft account has no Azure subscription to deploy to.",
+    );
+    err.needsAzureSignup = { signupUrl: AZURE_SIGNUP_URL };
+    throw err;
+  }
+
+  try {
+    await armToken();
+  } catch (err) {
+    account = null;
+    if (isNoAzureAccessError(err)) err.needsAzureSignup = { signupUrl: AZURE_SIGNUP_URL };
+    else if (isAdminConsentError(err)) err.adminConsent = { url: adminConsentUrl(config) };
+    throw err;
+  }
+  return account;
 }
 
 export function azureSignOut() {
