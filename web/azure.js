@@ -17,6 +17,9 @@ const ARM_SCOPE = "https://management.azure.com/user_impersonation";
 const RG_API = "2021-04-01";
 const DEPLOY_API = "2021-04-01";
 
+/** Where to send an account that has no Azure subscription yet. */
+export const AZURE_SIGNUP_URL = "https://azure.microsoft.com/free/";
+
 let msal = null;
 let account = null;
 
@@ -72,6 +75,21 @@ function isAdminConsentError(err) {
   return /admin[^.]*\b(consent|approval)/i.test(text);
 }
 
+/**
+ * Heuristic: does this sign-in error mean the account simply has no Azure to
+ * manage — i.e. Azure Resource Manager isn't available for it? This is the
+ * personal-Microsoft-account case: the consumer tenant has no ARM resource, so
+ * requesting the ARM scope returns invalid_scope ("...management.azure.com...
+ * does not exist"). Also covers the "resource principal not found in tenant"
+ * and "user account doesn't exist in tenant" variants. These accounts can't
+ * deploy until they sign up for Azure (which provisions a directory for them).
+ */
+function isNoAzureAccessError(err) {
+  const text = `${err?.errorCode || ""} ${err?.errorMessage || ""} ${err?.message || ""}`;
+  if (/invalid_scope/i.test(text) && /management\.azure\.com/i.test(text)) return true;
+  return /AADSTS500011|AADSTS650052|AADSTS50020/.test(text);
+}
+
 /** Interactive sign-in; resolves the signed-in account. */
 export async function azureSignIn(config) {
   const app = await ensureMsal(config);
@@ -81,7 +99,9 @@ export async function azureSignIn(config) {
     app.setActiveAccount(account);
     return account;
   } catch (err) {
-    if (isAdminConsentError(err)) {
+    if (isNoAzureAccessError(err)) {
+      err.needsAzureSignup = { signupUrl: AZURE_SIGNUP_URL };
+    } else if (isAdminConsentError(err)) {
       err.adminConsent = { url: adminConsentUrl(config) };
     }
     throw err;

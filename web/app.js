@@ -187,6 +187,28 @@ function renderAzureError(err) {
   el.classList.remove("hidden");
   el.textContent = "";
   const ac = err.adminConsent;
+  if (err.needsAzureSignup) {
+    const strong = document.createElement("strong");
+    strong.textContent = "No Azure subscription on this account. ";
+    el.append(strong);
+    el.append(
+      document.createTextNode(
+        "This tool deploys to Azure, so you need an account that has an Azure subscription. Personal Microsoft accounts are welcome — create a free Azure account (it sets up your Azure directory), then sign in again: ",
+      ),
+    );
+    const a = document.createElement("a");
+    a.href = err.needsAzureSignup.signupUrl;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = "Create a free Azure account ↗";
+    el.append(a);
+    el.append(
+      document.createTextNode(
+        " Already have a subscription? Sign in and pick the organization/directory that holds it.",
+      ),
+    );
+    return;
+  }
   if (!ac) {
     el.textContent = `Azure sign-in failed: ${err.message}`;
     return;
