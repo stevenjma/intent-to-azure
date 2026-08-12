@@ -17,6 +17,9 @@
  *   GITHUB_CLIENT_ID      – OAuth App client id (public)
  *   GITHUB_CLIENT_SECRET  – OAuth App client secret (SECRET)
  *   ALLOWED_ORIGIN        – exact Pages origin, e.g. https://you.github.io
+ *   ALLOW_SIGNUP          – optional; "true" (default) lets users without a
+ *                           GitHub account sign up mid-flow. Set "false" to keep
+ *                           the OAuth screen sign-in-only for a closed audience.
  */
 
 export default {
@@ -32,7 +35,11 @@ export default {
       gh.searchParams.set("redirect_uri", redirectUri);
       gh.searchParams.set("scope", scope);
       gh.searchParams.set("state", state);
-      gh.searchParams.set("allow_signup", "false");
+      // Public hosted SaaS: default to allowing account sign-up so new GitHub
+      // users aren't dead-ended. Operators can set ALLOW_SIGNUP="false" to lock
+      // the flow to existing accounts.
+      const allowSignup = (env.ALLOW_SIGNUP ?? "true").toLowerCase() === "true";
+      gh.searchParams.set("allow_signup", allowSignup ? "true" : "false");
       return Response.redirect(gh.toString(), 302);
     }
 

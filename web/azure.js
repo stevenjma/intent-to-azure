@@ -43,13 +43,49 @@ export function azureSignedIn() {
   return account != null;
 }
 
+/**
+ * Build the Entra admin-consent deep link for this app. When a tenant gates the
+ * (unverified) app behind admin approval, an admin opens this once and grants
+ * consent for the whole tenant. We target /organizations (admin consent is an
+ * org-only concept; personal accounts can't grant it) and let the admin's home
+ * tenant resolve on sign-in. All inputs here are our own PUBLIC client id and
+ * origin — no secret, no user-controlled data.
+ */
+export function adminConsentUrl(config) {
+  const redirectUri = window.location.origin + window.location.pathname;
+  const params = new URLSearchParams({
+    client_id: config.azureClientId,
+    redirect_uri: redirectUri,
+  });
+  return `https://login.microsoftonline.com/organizations/adminconsent?${params.toString()}`;
+}
+
+/**
+ * Heuristic: does this MSAL sign-in error mean the tenant requires an admin to
+ * consent before the app can be used? Keyed on the specific AADSTS admin-consent
+ * codes and the "admin approval/consent" wording so plain user cancellations
+ * (e.g. AADSTS65004 "user declined") don't trigger the admin-consent UX.
+ */
+function isAdminConsentError(err) {
+  const text = `${err?.errorCode || ""} ${err?.errorMessage || ""} ${err?.message || ""}`;
+  if (/AADSTS90094|AADSTS65001|AADSTS90095/.test(text)) return true;
+  return /admin[^.]*\b(consent|approval)/i.test(text);
+}
+
 /** Interactive sign-in; resolves the signed-in account. */
 export async function azureSignIn(config) {
   const app = await ensureMsal(config);
-  const res = await app.loginPopup({ scopes: [ARM_SCOPE] });
-  account = res.account;
-  app.setActiveAccount(account);
-  return account;
+  try {
+    const res = await app.loginPopup({ scopes: [ARM_SCOPE] });
+    account = res.account;
+    app.setActiveAccount(account);
+    return account;
+  } catch (err) {
+    if (isAdminConsentError(err)) {
+      err.adminConsent = { url: adminConsentUrl(config) };
+    }
+    throw err;
+  }
 }
 
 export function azureSignOut() {
