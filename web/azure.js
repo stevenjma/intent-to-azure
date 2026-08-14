@@ -6,7 +6,10 @@
  * loginPopup (so personal accounts aren't blocked by ARM resource discovery),
  * then an ARM token acquisition (https://management.azure.com/user_impersonation)
  * that drives resource-group ensure → what-if (always, as a gate) → deployment
- * create over fetch. The token lives in MSAL's in-memory cache only.
+ * create over fetch. When the browser blocks popups (embedded webviews, strict
+ * blockers), both steps fall back to a full-page redirect flow that boot resumes
+ * via handleAzureRedirect. Tokens live in tab-scoped sessionStorage (needed so
+ * the redirect survives navigation) and are cleared when the tab closes.
  *
  * MSAL is loaded from a CDN as an ES module (see the CSP in index.html).
  */
@@ -47,7 +50,13 @@ async function ensureMsal(config) {
       authority: `https://login.microsoftonline.com/${config.azureTenant || "common"}`,
       redirectUri: window.location.origin + window.location.pathname,
     },
-    cache: { cacheLocation: "memoryStorage" }, // never persist tokens
+    cache: {
+      // sessionStorage (not memory) so the redirect fallback survives the
+      // full-page navigation MSAL performs when popups are blocked. Still
+      // tab-scoped and cleared when the tab closes; nothing persists to disk.
+      cacheLocation: "sessionStorage",
+      storeAuthStateInCookie: false,
+    },
   });
   await msal.initialize();
   return msal;
@@ -119,6 +128,87 @@ function isConsumerAccount(acct) {
 }
 
 /**
+ * Did an MSAL interactive call fail because the browser refused to open a popup?
+ * This happens in embedded/webview browsers, strict popup blockers, and some
+ * privacy modes. The signal is the BrowserAuthError codes for popup/window
+ * failures — when we see it we fall back to the full-page redirect flow, which
+ * needs no popup at all.
+ */
+function isPopupBlocked(err) {
+  const code = `${err?.errorCode || ""}`.toLowerCase();
+  if (code === "popup_window_error" || code === "empty_window_error") return true;
+  const text = `${err?.errorMessage || ""} ${err?.message || ""}`.toLowerCase();
+  return /error opening popup|popups?\s+(are\s+)?blocked|popup window/.test(text);
+}
+
+/** Does this MSAL result already carry an ARM token (vs. an identity-only login)? */
+function hasArmScope(res) {
+  return (res?.scopes || []).some((s) => /management\.azure\.com/i.test(s));
+}
+
+/**
+ * Shared post-login path: adopt the account, reject pure personal accounts with
+ * friendly signup guidance, then prove ARM is reachable (surfacing no-Azure /
+ * admin-consent problems as catchable, tagged errors). A `redirecting` error is
+ * re-thrown untouched — the page is navigating away to complete the flow.
+ */
+async function completeAzureSignIn(config, res) {
+  account = res.account;
+  msal.setActiveAccount(account);
+
+  if (isConsumerAccount(account)) {
+    account = null;
+    const err = new Error(
+      "This personal Microsoft account has no Azure subscription to deploy to.",
+    );
+    err.needsAzureSignup = { signupUrl: AZURE_SIGNUP_URL };
+    throw err;
+  }
+
+  try {
+    await armToken();
+  } catch (err) {
+    if (err?.redirecting) throw err;
+    account = null;
+    if (isNoAzureAccessError(err)) err.needsAzureSignup = { signupUrl: AZURE_SIGNUP_URL };
+    else if (isAdminConsentError(err)) err.adminConsent = { url: adminConsentUrl(config) };
+    throw err;
+  }
+  return account;
+}
+
+/**
+ * Resume an in-flight redirect sign-in on page load. Call once at boot BEFORE any
+ * other MSAL interaction. Returns the signed-in account when we've just come back
+ * from a redirect, or null when there is nothing to resume. Throws the same
+ * tagged errors as azureSignIn (needsAzureSignup / adminConsent) so callers can
+ * reuse their error rendering. May itself navigate away (to fetch the ARM token
+ * after an identity-only login redirect); in that case it never resolves.
+ */
+export async function handleAzureRedirect(config) {
+  const app = await ensureMsal(config);
+  let res;
+  try {
+    res = await app.handleRedirectPromise();
+  } catch (err) {
+    if (isAdminConsentError(err)) err.adminConsent = { url: adminConsentUrl(config) };
+    else if (isNoAzureAccessError(err)) err.needsAzureSignup = { signupUrl: AZURE_SIGNUP_URL };
+    throw err;
+  }
+  if (!res || !res.account) return null;
+
+  // Second redirect leg: ARM token already in hand — sign-in is complete.
+  if (hasArmScope(res)) {
+    account = res.account;
+    app.setActiveAccount(account);
+    return account;
+  }
+  // First leg: identity-only login just completed — run the consumer check and
+  // ARM acquisition (which may redirect again for the ARM token).
+  return completeAzureSignIn(config, res);
+}
+
+/**
  * Interactive sign-in; resolves the signed-in account and proves ARM is
  * reachable. Two steps on purpose:
  *   1. loginPopup with identity-only scopes — no Azure resource, so a personal
@@ -134,31 +224,20 @@ export async function azureSignIn(config) {
   try {
     res = await app.loginPopup({ scopes: LOGIN_SCOPES });
   } catch (err) {
+    // Popup blocked (embedded browser / strict blocker): fall back to a full-page
+    // redirect, which needs no popup. This navigates away; boot's resume path
+    // (handleAzureRedirect) picks the flow back up when the page reloads.
+    if (isPopupBlocked(err)) {
+      await app.loginRedirect({ scopes: LOGIN_SCOPES });
+      const redirecting = new Error("Redirecting to sign in…");
+      redirecting.redirecting = true;
+      throw redirecting;
+    }
     if (isAdminConsentError(err)) err.adminConsent = { url: adminConsentUrl(config) };
     else if (isNoAzureAccessError(err)) err.needsAzureSignup = { signupUrl: AZURE_SIGNUP_URL };
     throw err;
   }
-  account = res.account;
-  app.setActiveAccount(account);
-
-  if (isConsumerAccount(account)) {
-    account = null;
-    const err = new Error(
-      "This personal Microsoft account has no Azure subscription to deploy to.",
-    );
-    err.needsAzureSignup = { signupUrl: AZURE_SIGNUP_URL };
-    throw err;
-  }
-
-  try {
-    await armToken();
-  } catch (err) {
-    account = null;
-    if (isNoAzureAccessError(err)) err.needsAzureSignup = { signupUrl: AZURE_SIGNUP_URL };
-    else if (isAdminConsentError(err)) err.adminConsent = { url: adminConsentUrl(config) };
-    throw err;
-  }
-  return account;
+  return completeAzureSignIn(config, res);
 }
 
 export function azureSignOut() {
@@ -172,8 +251,20 @@ async function armToken() {
     const r = await msal.acquireTokenSilent({ scopes: [ARM_SCOPE], account });
     return r.accessToken;
   } catch {
-    const r = await msal.acquireTokenPopup({ scopes: [ARM_SCOPE] });
-    return r.accessToken;
+    try {
+      const r = await msal.acquireTokenPopup({ scopes: [ARM_SCOPE] });
+      return r.accessToken;
+    } catch (err) {
+      // Popup blocked: fall back to a full-page redirect for the ARM token. This
+      // navigates away; the resume path completes sign-in on the next load.
+      if (isPopupBlocked(err)) {
+        await msal.acquireTokenRedirect({ scopes: [ARM_SCOPE], account });
+        const redirecting = new Error("Redirecting for Azure access…");
+        redirecting.redirecting = true;
+        throw redirecting;
+      }
+      throw err;
+    }
   }
 }
 
