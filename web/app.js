@@ -21,11 +21,12 @@ import {
   azureSignIn,
   azureSignOut,
   azureSignedIn,
+  handleAzureRedirect,
   listSubscriptions,
   ensureResourceGroup,
   whatIf,
   deploy,
-} from "./azure.js?v=20260812a";
+} from "./azure.js?v=20260814a";
 
 const cfg = window.AZX_CONFIG || {};
 const $ = (id) => document.getElementById(id);
@@ -97,6 +98,9 @@ function boot() {
   const hash = location.hash.replace(/^#/, "");
   if (STAGES.includes(hash)) currentStage = hash;
   render();
+
+  // Resume a redirect-based Azure sign-in if we just came back from one.
+  resumeAzureRedirect();
 }
 
 // --------------------------------------------------------------------------
@@ -158,12 +162,41 @@ async function onAzureSignIn() {
   setDot("btn-azure", "pending");
   try {
     const acct = await azureSignIn(cfg);
-    setDot("btn-azure", "in");
-    $("btn-azure").lastChild.textContent = ` ${acct.username || "Signed in"}`;
-    clearAuthNotice();
+    applyAzureSignedIn(acct);
     await populateSubscriptions();
     render();
   } catch (err) {
+    if (err?.redirecting) return; // navigating away to finish sign-in
+    setDot("btn-azure", "out");
+    renderAzureError(err);
+  }
+}
+
+/** Reflect a signed-in Azure account in the button + notice. */
+function applyAzureSignedIn(acct) {
+  setDot("btn-azure", "in");
+  $("btn-azure").lastChild.textContent = ` ${acct.username || "Signed in"}`;
+  clearAuthNotice();
+}
+
+/**
+ * Resume a redirect-based Azure sign-in on page load. When popups are blocked we
+ * complete auth via full-page redirects; on the way back MSAL hands us the result
+ * here. No-op when we didn't just return from a redirect.
+ */
+async function resumeAzureRedirect() {
+  setDot("btn-azure", "pending");
+  try {
+    const acct = await handleAzureRedirect(cfg);
+    if (!acct) {
+      setDot("btn-azure", "out");
+      return;
+    }
+    applyAzureSignedIn(acct);
+    await populateSubscriptions();
+    render();
+  } catch (err) {
+    if (err?.redirecting) return; // navigating away for the next leg
     setDot("btn-azure", "out");
     renderAzureError(err);
   }
