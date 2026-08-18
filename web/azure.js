@@ -8,7 +8,7 @@
  * that drives resource-group ensure → what-if (always, as a gate) → deployment
  * create over fetch. When the browser blocks popups (embedded webviews, strict
  * blockers), both steps fall back to a full-page redirect flow that boot resumes
- * via handleAzureRedirect. Tokens live in tab-scoped sessionStorage (needed so
+ * via restoreAzureSession. Tokens live in tab-scoped sessionStorage (needed so
  * the redirect survives navigation) and are cleared when the tab closes.
  *
  * MSAL is loaded from a CDN as an ES module (see the CSP in index.html).
@@ -178,15 +178,20 @@ async function completeAzureSignIn(config, res) {
 }
 
 /**
- * Resume an in-flight redirect sign-in on page load. Call once at boot BEFORE any
- * other MSAL interaction. Returns the signed-in account when we've just come back
- * from a redirect, or null when there is nothing to resume. Throws the same
- * tagged errors as azureSignIn (needsAzureSignup / adminConsent) so callers can
- * reuse their error rendering. May itself navigate away (to fetch the ARM token
- * after an identity-only login redirect); in that case it never resolves.
+ * Restore Azure sign-in on page load. Two cases, in order:
+ *   1. Redirect return — if we just came back from a loginRedirect /
+ *      acquireTokenRedirect, adopt the result (and possibly kick off the second
+ *      redirect leg to fetch the ARM token).
+ *   2. Plain reload — MSAL's sessionStorage still holds the account from an
+ *      earlier popup sign-in; rehydrate it and confirm ARM access silently
+ *      (never auto-prompting on a reload).
+ * Returns the signed-in account, or null when there's nothing to restore. Throws
+ * the same tagged errors as azureSignIn. May navigate away (redirect leg 2); in
+ * that case it never resolves.
  */
-export async function handleAzureRedirect(config) {
+export async function restoreAzureSession(config) {
   const app = await ensureMsal(config);
+
   let res;
   try {
     res = await app.handleRedirectPromise();
@@ -195,17 +200,32 @@ export async function handleAzureRedirect(config) {
     else if (isNoAzureAccessError(err)) err.needsAzureSignup = { signupUrl: AZURE_SIGNUP_URL };
     throw err;
   }
-  if (!res || !res.account) return null;
 
-  // Second redirect leg: ARM token already in hand — sign-in is complete.
-  if (hasArmScope(res)) {
-    account = res.account;
-    app.setActiveAccount(account);
-    return account;
+  if (res && res.account) {
+    // Second redirect leg: ARM token already in hand — sign-in is complete.
+    if (hasArmScope(res)) {
+      account = res.account;
+      app.setActiveAccount(account);
+      return account;
+    }
+    // First leg: identity-only login just completed — run the consumer check and
+    // ARM acquisition (which may redirect again for the ARM token).
+    return completeAzureSignIn(config, res);
   }
-  // First leg: identity-only login just completed — run the consumer check and
-  // ARM acquisition (which may redirect again for the ARM token).
-  return completeAzureSignIn(config, res);
+
+  // Plain reload: rehydrate a still-cached account from MSAL (sessionStorage).
+  const cached = app.getActiveAccount() || app.getAllAccounts()[0];
+  if (!cached || isConsumerAccount(cached)) return null;
+  account = cached;
+  app.setActiveAccount(account);
+  // Confirm ARM is still reachable silently; never auto-prompt on a reload.
+  try {
+    await msal.acquireTokenSilent({ scopes: [ARM_SCOPE], account });
+  } catch {
+    // Silent refresh failed (e.g. interaction required). Keep the identity for
+    // the UI; the next deploy prompts for a fresh ARM token as needed.
+  }
+  return account;
 }
 
 /**
@@ -226,7 +246,7 @@ export async function azureSignIn(config) {
   } catch (err) {
     // Popup blocked (embedded browser / strict blocker): fall back to a full-page
     // redirect, which needs no popup. This navigates away; boot's resume path
-    // (handleAzureRedirect) picks the flow back up when the page reloads.
+    // (restoreAzureSession) picks the flow back up when the page reloads.
     if (isPopupBlocked(err)) {
       await app.loginRedirect({ scopes: LOGIN_SCOPES });
       const redirecting = new Error("Redirecting to sign in…");
