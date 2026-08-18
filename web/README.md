@@ -110,11 +110,17 @@ token** and a **GitHub token** in memory, so **XSS is the crown-jewel risk**. Mi
 - **Strict CSP** (in `index.html`): `default-src 'none'`, no inline scripts, scripts
   only from `self` + `esm.sh` (MSAL), `connect-src` pinned to Azure ARM + the GitHub
   API + esm.sh. The Worker isn't in `connect-src` because the SPA never fetches it —
-  it's reached via `window.open` + `postMessage`.
-- **Tokens are never persisted** — MSAL uses `memoryStorage`; the GitHub token is a
-  module-scoped variable. A refresh signs you out.
-- **OAuth token delivery is origin-pinned**: the Worker `postMessage`s to your exact
-  Pages origin, never `*`.
+  it's reached via `window.open` + `postMessage` (popup) or a top-level redirect.
+- **Tokens are tab-scoped, not memory-only.** To survive the redirect sign-in flow
+  and page reloads, tokens live in **`sessionStorage`** (MSAL cache + the GitHub
+  session), which is origin-scoped and **cleared when the tab closes**. The GitHub
+  session additionally carries an **8-hour TTL** and is dropped if the token is
+  revoked; Azure re-validates silently against MSAL's cached account. This is a
+  deliberate trade: closing the tab still signs you out, but a reload no longer does.
+- **OAuth token delivery is origin-pinned**: in popup mode the Worker `postMessage`s
+  to your exact Pages origin (never `*`); in redirect mode it 302s the token back only
+  to a return URL that `startsWith` `ALLOWED_ORIGIN`, else it falls back to the Pages
+  origin — so a forged return URL can't exfiltrate the token.
 - The engine treats the scanned repo as **untrusted data** (same validation as the
   CLI): the ledger/scaffold regexes and `isDeployLedger` guard run unchanged in-browser.
 

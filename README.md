@@ -538,9 +538,40 @@ app-intent.schema.json   the open contract (JSON Schema 2020-12)
 SPEC.md         human-readable contract spec
 ```
 
+## Compatibility & known limitations
+
+The hosted browser app ([`web/`](./web/README.md)) is a **proof of concept**. Who can
+use it today depends entirely on one setting your Azure tenant admin controls — the
+**user-consent policy** — not on your license tier:
+
+| Your Azure account | Browser sign-in | Real deploy from the browser |
+|---|---|---|
+| Personal Microsoft account | ✅ works | ✅ works |
+| Work/school tenant that allows user consent | ✅ works | ✅ works |
+| Work/school tenant restricted to *verified-publisher* apps | ✅ works | ⚠️ deploy needs a one-time **admin consent** |
+| Locked-down tenant (no user consent) | ⚠️ needs admin consent | ⚠️ needs admin consent |
+
+**Why:** real deploy requests the Azure Resource Manager `user_impersonation` scope,
+which is high-privilege and **requires tenant admin consent in every enterprise tenant**
+— Publisher Verification does not waive it. The app detects this and surfaces a
+one-click **admin-consent link** (an admin approves once per org). See
+[web/README](./web/README.md#deployment-model-hosted-multi-tenant).
+
+**Escape hatches that always work, regardless of tenant policy:**
+
+- **The CLI** (below) — runs fully offline; `up --local-deploy` deploys through your own
+  `az` login with no third-party app consent.
+- **The codified pipeline** — `ship --create-repo` (or the browser's "codify" path)
+  creates a repo whose GitHub Actions **OIDC** pipeline deploys under a per-tenant
+  service principal your admin sets up once. No interactive ARM consent needed.
+
+For a PoC launch, the practical audience is personal accounts and permissive
+startup-style tenants; enterprise users are steered to the pipeline path.
+
 ## Scope & guardrails
 
-- Backend/engine first — **no web UI**.
+- Backend/engine first; the browser app in [`web/`](./web/README.md) is a thin UI over
+  the same engine (see the compatibility caveat above).
 - The default commands (`scan`/`plan`/`bicep`/`what-if`/`up`) generate and preview
   offline. Two opt-in paths reach the network/cloud: `up --local-deploy --yes` runs
   the real Azure deploy locally through your `az` CLI, and `ship --create-repo` uses
