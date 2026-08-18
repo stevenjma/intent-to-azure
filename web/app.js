@@ -6,27 +6,29 @@
  * github.js. This file is glue + rendering only; it never persists tokens.
  */
 
-import { resolveScan, generateArmTemplate, planNeedsPgPassword } from "./engine/web-engine.js?v=20260812a";
+import { resolveScan, generateArmTemplate, planNeedsPgPassword } from "./engine/web-engine.js?v=20260818a";
 import {
   githubSignIn,
   githubSignOut,
   githubSignedIn,
   githubUser,
+  handleGithubRedirect,
+  restoreGithubSession,
   fetchRepoFiles,
   createRepoAndPush,
   listAccessibleRepos,
   searchRepos,
-} from "./github.js?v=20260812a";
+} from "./github.js?v=20260818a";
 import {
   azureSignIn,
   azureSignOut,
   azureSignedIn,
-  handleAzureRedirect,
+  restoreAzureSession,
   listSubscriptions,
   ensureResourceGroup,
   whatIf,
   deploy,
-} from "./azure.js?v=20260814a";
+} from "./azure.js?v=20260818a";
 
 const cfg = window.AZX_CONFIG || {};
 const $ = (id) => document.getElementById(id);
@@ -99,8 +101,8 @@ function boot() {
   if (STAGES.includes(hash)) currentStage = hash;
   render();
 
-  // Resume a redirect-based Azure sign-in if we just came back from one.
-  resumeAzureRedirect();
+  // Restore any prior sign-ins (redirect return or a saved tab session).
+  restoreSessions();
 }
 
 // --------------------------------------------------------------------------
@@ -180,26 +182,36 @@ function applyAzureSignedIn(acct) {
 }
 
 /**
- * Resume a redirect-based Azure sign-in on page load. When popups are blocked we
- * complete auth via full-page redirects; on the way back MSAL hands us the result
- * here. No-op when we didn't just return from a redirect.
+ * Restore prior sign-ins on page load. Handles redirect-flow returns for both
+ * providers, then falls back to a saved tab session (GitHub) or MSAL's cached
+ * account (Azure). Sets each button straight to its final state — no "pending"
+ * flicker on loads where there's nothing to restore.
  */
-async function resumeAzureRedirect() {
-  setDot("btn-azure", "pending");
+async function restoreSessions() {
   try {
-    const acct = await handleAzureRedirect(cfg);
-    if (!acct) {
-      setDot("btn-azure", "out");
-      return;
+    let ghUser = await handleGithubRedirect();
+    if (!ghUser) ghUser = await restoreGithubSession();
+    if (ghUser) {
+      setDot("btn-github", "in");
+      $("btn-github").lastChild.textContent = ` ${ghUser.login}`;
+      loadRepoChoices();
     }
-    applyAzureSignedIn(acct);
-    await populateSubscriptions();
-    render();
   } catch (err) {
-    if (err?.redirecting) return; // navigating away for the next leg
-    setDot("btn-azure", "out");
+    if (!err?.redirecting) console.warn("GitHub session restore:", err.message);
+  }
+
+  try {
+    const acct = await restoreAzureSession(cfg);
+    if (acct) {
+      applyAzureSignedIn(acct);
+      await populateSubscriptions();
+    }
+  } catch (err) {
+    if (err?.redirecting) return; // navigating away for the next redirect leg
     renderAzureError(err);
   }
+
+  render();
 }
 
 function clearAuthNotice() {
@@ -276,6 +288,7 @@ async function onGithubSignIn() {
     render();
     loadRepoChoices();
   } catch (err) {
+    if (err?.redirecting) return; // navigating away to GitHub
     setDot("btn-github", "out");
     alert(`GitHub sign-in failed: ${err.message}`);
   }

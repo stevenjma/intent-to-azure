@@ -49,6 +49,113 @@ export function __setAuth(authToken, authUser) {
   user = authUser;
 }
 
+// --------------------------------------------------------------------------
+// Session persistence + OAuth redirect fallback
+// --------------------------------------------------------------------------
+
+/** Tab-scoped storage keys (sessionStorage: survives reload, dies on tab close). */
+const SESSION_KEY = "azx.gh.session";
+const OAUTH_STATE_KEY = "azx.gh.oauth_state";
+/** Max lifetime we keep a restored GitHub session before forcing a fresh sign-in. */
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
+
+/** URL-safe base64 (ASCII input — our own origin+path). */
+function b64urlEncode(s) {
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** Save the current token+user to this tab so a reload stays signed in. */
+function persistSession() {
+  try {
+    if (!token) return;
+    sessionStorage.setItem(
+      SESSION_KEY,
+      JSON.stringify({ token, user, exp: Date.now() + SESSION_TTL_MS }),
+    );
+  } catch {
+    /* storage unavailable — stay in-memory only */
+  }
+}
+
+function clearSession() {
+  try {
+    sessionStorage.removeItem(SESSION_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Rehydrate a GitHub session saved in this tab. Survives page reload; cleared on
+ * tab close or once SESSION_TTL_MS elapses. Validates the token with a /user call
+ * so a revoked or expired token can't leave a half-signed-in UI. Returns the user
+ * or null.
+ */
+export async function restoreGithubSession() {
+  let rec;
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    rec = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!rec?.token || !rec?.exp || Date.now() > rec.exp) {
+    clearSession();
+    return null;
+  }
+  token = rec.token;
+  try {
+    user = await gh("/user");
+    return user;
+  } catch {
+    githubSignOut();
+    return null;
+  }
+}
+
+/** Drop any auth data left in the address bar / history after a redirect return. */
+function stripAuthFragment() {
+  try {
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Complete a redirect-based GitHub sign-in on page load. When popups are blocked
+ * the whole tab goes through the Worker + GitHub, and the Worker redirects back
+ * here with the token in the URL fragment. We read it, strip it from history
+ * immediately (so the token isn't left in the address bar), verify the CSRF
+ * state, then fetch the user. No-op when there's no auth fragment present.
+ */
+export async function handleGithubRedirect() {
+  const hash = window.location.hash || "";
+  if (!/azx_gh_(token|error)=/.test(hash)) return null;
+  const params = new URLSearchParams(hash.replace(/^#/, ""));
+  const tok = params.get("azx_gh_token");
+  const err = params.get("azx_gh_error");
+  const state = params.get("state");
+  stripAuthFragment();
+  let expected = null;
+  try {
+    expected = sessionStorage.getItem(OAUTH_STATE_KEY);
+    sessionStorage.removeItem(OAUTH_STATE_KEY);
+  } catch {
+    /* ignore */
+  }
+  if (err) throw new Error(`GitHub sign-in failed: ${err}`);
+  if (!tok) return null;
+  if (!expected || state !== expected) {
+    throw new Error("GitHub OAuth state mismatch — aborting.");
+  }
+  token = tok;
+  user = await gh("/user");
+  persistSession();
+  return user;
+}
+
 function ext(path) {
   const base = path.slice(path.lastIndexOf("/") + 1);
   if (base.toLowerCase() === "dockerfile") return ".dockerfile";
@@ -114,9 +221,13 @@ async function gh(path, { method = "GET", body, raw = false } = {}) {
 }
 
 /**
- * Kick off GitHub OAuth via a popup to the Worker's /login, which redirects to
- * GitHub, exchanges the code, and postMessages `{ type: "azx-github-token", token }`
- * back here. Resolves once the token arrives (and we've fetched the user).
+ * Kick off GitHub OAuth. Default path is a popup to the Worker's /login, which
+ * redirects to GitHub, exchanges the code, and postMessages
+ * `{ type: "azx-github-token", token, state }` back here. If the browser blocks
+ * the popup (embedded webviews, strict blockers), we fall back to a full-page
+ * redirect: the Worker bounces the token back in the URL fragment and boot's
+ * handleGithubRedirect resumes it. The CSRF state encodes the mode (`.p`/`.r`)
+ * and, for redirect mode, our own return URL so the Worker knows where to return.
  */
 export function githubSignIn(config) {
   return new Promise((resolve, reject) => {
@@ -124,19 +235,37 @@ export function githubSignIn(config) {
       reject(new Error("GitHub not configured (githubClientId / githubWorkerUrl)."));
       return;
     }
-    const state = crypto.randomUUID();
+    const csrf = crypto.randomUUID();
+    const scope = config.githubScopes || "repo workflow read:user";
+    const base = config.githubWorkerUrl.replace(/\/$/, "");
+    const workerOrigin = new URL(config.githubWorkerUrl).origin;
+
+    const popupState = `${csrf}.p`;
     const loginUrl =
-      `${config.githubWorkerUrl.replace(/\/$/, "")}/login` +
-      `?state=${encodeURIComponent(state)}` +
-      `&scope=${encodeURIComponent(config.githubScopes || "repo workflow read:user")}`;
+      `${base}/login?state=${encodeURIComponent(popupState)}&scope=${encodeURIComponent(scope)}`;
 
     const popup = window.open(loginUrl, "azx-github-oauth", "width=560,height=720");
     if (!popup) {
-      reject(new Error("Popup blocked — allow popups for this site and retry."));
+      // Popup blocked: full-page redirect fallback. Carry our return URL in the
+      // state (base64url) so the Worker can bounce the token back to this exact
+      // page; the Worker validates it against ALLOWED_ORIGIN to prevent open
+      // redirects. We stash the full state for CSRF check on return.
+      const returnUrl = window.location.origin + window.location.pathname;
+      const redirectState = `${csrf}.r.${b64urlEncode(returnUrl)}`;
+      try {
+        sessionStorage.setItem(OAUTH_STATE_KEY, redirectState);
+      } catch {
+        /* ignore */
+      }
+      const redirUrl =
+        `${base}/login?state=${encodeURIComponent(redirectState)}&scope=${encodeURIComponent(scope)}`;
+      const redirecting = new Error("Redirecting to GitHub…");
+      redirecting.redirecting = true;
+      reject(redirecting);
+      window.location.assign(redirUrl);
       return;
     }
 
-    const workerOrigin = new URL(config.githubWorkerUrl).origin;
     const onMessage = async (ev) => {
       if (ev.origin !== workerOrigin) return;
       const data = ev.data || {};
@@ -151,13 +280,14 @@ export function githubSignIn(config) {
         reject(new Error(`GitHub sign-in failed: ${data.error}`));
         return;
       }
-      if (data.state !== state) {
+      if (data.state !== popupState) {
         reject(new Error("GitHub OAuth state mismatch — aborting."));
         return;
       }
       token = data.token;
       try {
         user = await gh("/user");
+        persistSession();
         resolve(user);
       } catch (err) {
         reject(err);
@@ -170,6 +300,7 @@ export function githubSignIn(config) {
 export function githubSignOut() {
   token = null;
   user = null;
+  clearSession();
 }
 
 /**
