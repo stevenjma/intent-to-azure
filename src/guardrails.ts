@@ -45,9 +45,16 @@ function normalizeGuardrails(raw: Record<string, unknown>, source: string): Guar
   rejectUnknown(raw, ["regions", "approvedModels", "approved_models", "budget", "skuTier", "sku_tier", "notes"], source);
   const g: Guardrails = {};
   const regions = stringArray(raw.regions, "regions", source);
+  if (raw.regions !== undefined && regions.length === 0) {
+    throw new Error(`invalid guardrails in ${source}: regions must contain at least one value`);
+  }
   if (regions.length) g.regions = regions;
 
-  const approvedModels = stringArray(raw.approvedModels ?? raw.approved_models, "approvedModels", source);
+  const approvedModelsValue = raw.approvedModels ?? raw.approved_models;
+  const approvedModels = stringArray(approvedModelsValue, "approvedModels", source);
+  if (approvedModelsValue !== undefined && approvedModels.length === 0) {
+    throw new Error(`invalid guardrails in ${source}: approvedModels must contain at least one value`);
+  }
   if (approvedModels.length) g.approvedModels = approvedModels;
 
   if (raw.budget !== undefined && !isRecord(raw.budget)) {

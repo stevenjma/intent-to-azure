@@ -42,7 +42,15 @@ test("Bicep escapes every untrusted string sink", () => {
 });
 
 test("strict guardrails reject malformed YAML, invalid roots, values, and typos with a path", () => {
-  for (const yaml of ["regions: [eastus2", "- eastus2", "skuTier: cheap", "budegt:\n  monthlyCapUsd: 1"]) {
+  for (const yaml of [
+    "regions: [eastus2",
+    "- eastus2",
+    "skuTier: cheap",
+    "budegt:\n  monthlyCapUsd: 1",
+    "regions: []",
+    "approvedModels: []",
+    "approved_models: []",
+  ]) {
     assert.throws(() => parseGuardrails(yaml, "repo/guardrails.yaml"), /repo\/guardrails\.yaml/);
   }
 });
@@ -88,17 +96,19 @@ test("medium/low confirmations fail closed in local deploy and ship library APIs
 });
 
 test("block budgets fail closed for unbounded consumption", () => {
-  const intent = {
-    ...baseIntent,
-    needs: [{
-      capability: "web-compute", confidence: "high" as const, rationale: "test", evidence: ["test"],
-    }],
-  };
-  const p = plan(intent, {
-    guardrails: { regions: ["eastus2"], budget: { monthlyCapUsd: 1000, onExceed: "block" } },
-  });
-  assert.equal(p.budget.blocked, true);
-  assert.ok(p.budget.warnings.some((w) => /cannot prove/.test(w)));
+  for (const capability of ["web-compute", "object-storage", "search-index", "transactional-relational"]) {
+    const intent = {
+      ...baseIntent,
+      needs: [{
+        capability, confidence: "high" as const, rationale: "test", evidence: ["test"],
+      }],
+    };
+    const p = plan(intent, {
+      guardrails: { regions: ["eastus2"], budget: { monthlyCapUsd: 1000, onExceed: "block" } },
+    });
+    assert.equal(p.budget.blocked, true, `${capability} must not claim an enforceable spend cap`);
+    assert.ok(p.budget.warnings.some((w) => /cannot prove/.test(w)));
+  }
 });
 
 test("global service names obey Azure constraints and include deterministic collision suffixes", () => {

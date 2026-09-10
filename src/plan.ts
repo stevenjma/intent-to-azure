@@ -305,7 +305,10 @@ function rollUpBudget(
     r.type === "Microsoft.CognitiveServices/accounts" ||
     r.type === "Microsoft.CognitiveServices/accounts/deployments" ||
     r.type === "Microsoft.App/containerApps" ||
-    r.type === "Microsoft.App/jobs",
+    r.type === "Microsoft.App/jobs" ||
+    r.type === "Microsoft.Storage/storageAccounts" ||
+    r.type === "Microsoft.Search/searchServices" ||
+    r.type === "Microsoft.DBforPostgreSQL/flexibleServers",
   );
 
   warnings.push("Cost estimates are advisory; consumption and usage charges are not a hard spend limit.");

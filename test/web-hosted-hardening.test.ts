@@ -149,6 +149,18 @@ test("OAuth fragment is validated and removed before third-party modules load", 
   assert.match(bootstrap, /await import\("\.\/app\.js/);
 });
 
+test("hosted module cache keys move together for release changes", () => {
+  const html = source("web/index.html");
+  const bootstrap = source("web/bootstrap.js");
+  const app = source("web/app.js");
+  const version = html.match(/bootstrap\.js\?v=([^"]+)/)?.[1];
+  assert.ok(version);
+  assert.ok(bootstrap.includes(`app.js?v=${version}`));
+  for (const module of ["engine/web-engine", "github", "azure"]) {
+    assert.ok(app.includes(`${module}.js?v=${version}`));
+  }
+});
+
 test("Pages documentation does not claim meta CSP prevents framing", () => {
   const readme = source("web/README.md");
   assert.match(readme, /cannot enforce `frame-ancestors`/);

@@ -6,7 +6,7 @@
  * github.js. This file is glue + rendering only; it never persists tokens.
  */
 
-import { resolveScan, generateArmTemplate, planNeedsPgPassword } from "./engine/web-engine.js?v=20260818a";
+import { resolveScan, generateArmTemplate, planNeedsPgPassword } from "./engine/web-engine.js?v=20260910b";
 import {
   githubSignIn,
   githubSignOut,
@@ -18,7 +18,7 @@ import {
   createRepoAndPush,
   listAccessibleRepos,
   searchRepos,
-} from "./github.js?v=20260818a";
+} from "./github.js?v=20260910b";
 import {
   azureSignIn,
   azureSignOut,
@@ -29,7 +29,7 @@ import {
   ensureResourceGroup,
   whatIf,
   deploy,
-} from "./azure.js?v=20260818a";
+} from "./azure.js?v=20260910b";
 
 const cfg = window.AZX_CONFIG || {};
 const $ = (id) => document.getElementById(id);
