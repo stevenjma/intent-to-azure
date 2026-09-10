@@ -106,7 +106,11 @@ jobs:
 
       - name: Azure login (OIDC, optional)
         id: login
-        if: ${{ vars.AZURE_CLIENT_ID != '' && steps.compile.outputs.compile == 'pass' }}
+        if: >-
+          ${{ vars.AZURE_CLIENT_ID != '' &&
+              vars.AZURE_TENANT_ID != '' &&
+              vars.AZURE_SUBSCRIPTION_ID != '' &&
+              steps.compile.outputs.compile == 'pass' }}
         uses: azure/login@8216e11d8cd9b42fe925c852af8e76311ff067ac # v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
