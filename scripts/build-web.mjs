@@ -23,6 +23,7 @@ const ENTRY = "web-engine";
 function collect(entry) {
   const seen = new Set();
   const nodePulls = [];
+  const unsupportedDynamicImports = [];
   const walk = (mod) => {
     if (seen.has(mod)) return;
     seen.add(mod);
@@ -32,10 +33,23 @@ function collect(entry) {
     } catch {
       throw new Error(`build-web: missing compiled module dist/src/${mod}.js — run \`tsc\` first.`);
     }
-    const re = /from\s+["']([^"']+)["']/g;
-    let m;
-    while ((m = re.exec(text))) {
-      const spec = m[1];
+    const specs = new Set();
+    const patterns = [
+      /\b(?:import|export)\s+[^"'()]*?\sfrom\s*["']([^"']+)["']/g,
+      /\bimport\s*["']([^"']+)["']/g,
+      /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+    ];
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(text))) specs.add(match[1]);
+    }
+
+    const dynamicImports = [...text.matchAll(/\bimport\s*\(\s*([^"'`\s][^)]*)\)/g)];
+    for (const match of dynamicImports) {
+      unsupportedDynamicImports.push(`${mod}.js -> import(${match[1].trim()})`);
+    }
+
+    for (const spec of specs) {
       if (spec.startsWith("node:")) {
         nodePulls.push(`${mod}.js -> ${spec}`);
       } else if (spec.startsWith("./")) {
@@ -44,17 +58,19 @@ function collect(entry) {
     }
   };
   walk(entry);
-  return { modules: [...seen], nodePulls };
+  return { modules: [...seen], nodePulls, unsupportedDynamicImports };
 }
 
-const { modules, nodePulls } = collect(ENTRY);
+const { modules, nodePulls, unsupportedDynamicImports } = collect(ENTRY);
 
-if (nodePulls.length > 0) {
+if (nodePulls.length > 0 || unsupportedDynamicImports.length > 0) {
   console.error("build-web: FAILED — browser engine graph pulls Node builtins:");
   for (const p of nodePulls) console.error("  " + p);
+  for (const p of unsupportedDynamicImports) console.error("  unresolved dynamic import: " + p);
   console.error(
-    "\nA browser-safe module imported a `node:` builtin. Split the offending module\n" +
-      "into a pure core (imported by the browser graph) + a Node adapter (fs/child_process).",
+    "\nA browser-safe module imported a `node:` builtin or used a dynamic import that\n" +
+      "cannot be audited at build time. Keep imports literal, or split Node adapters\n" +
+      "(fs/child_process) from the browser-safe core.",
   );
   process.exit(1);
 }

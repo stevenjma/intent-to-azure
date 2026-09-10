@@ -11,7 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -22,9 +22,10 @@ import { buildScaffold } from "../src/scaffold.js";
 const FIXED = new Date("2024-01-01T00:00:00.000Z");
 
 function build(name: string) {
-  return resolveRepo(fileURLToPath(new URL(`../../examples/${name}`, import.meta.url)), {
+  const built = resolveRepo(fileURLToPath(new URL(`../../examples/${name}`, import.meta.url)), {
     now: () => FIXED,
   });
+  return { ...built, plan: { ...built.plan, confirmations: [] } };
 }
 
 /** A fake `az` that records calls and returns success (logged-in) by default. */
@@ -45,6 +46,9 @@ function fakeAz(overrides: Record<string, { status: number; stdout?: string; std
       return args.includes("tsv")
         ? { status: 0, stdout: id + "\n", stderr: "" }
         : { status: 0, stdout: JSON.stringify({ id }), stderr: "" };
+    }
+    if (args[0] === "group" && args[1] === "exists") {
+      return { status: 0, stdout: "true\n", stderr: "" };
     }
     return { status: 0, stdout: "", stderr: "" };
   };
@@ -73,7 +77,7 @@ test("Postgres plan without a password is refused before any az call", () => {
   const { runner, calls } = fakeAz();
   assert.throws(
     () => runLocalDeploy(plan, { ...pgOpts, pgPassword: undefined }, runner),
-    /--pg-password/,
+    /AZX_PG_PASSWORD/,
   );
   assert.equal(calls.length, 0, "must not call az when a required param is missing");
 });
@@ -147,6 +151,16 @@ test("the Postgres password never appears on argv — a @secure params file is u
     !calls.some((c) => c.some((a) => a.includes("P@ssw0rd!"))),
     "the raw password must never appear in any az argument",
   );
+});
+
+test("local deploy never overwrites or deletes a caller's sibling azx.params.json", () => {
+  const sibling = join(bicepDir, "azx.params.json");
+  writeFileSync(sibling, "caller-owned\n");
+  const { plan } = build("django-notes");
+  const { runner, calls } = fakeAz();
+  runLocalDeploy(plan, { ...pgOpts, apply: true, now: () => FIXED }, runner);
+  assert.equal(readFileSync(sibling, "utf8"), "caller-owned\n");
+  assert.ok(!calls.some((call) => call.includes(`@${sibling}`)));
 });
 
 test("a failed create emits a partial ledger for reconciliation", () => {

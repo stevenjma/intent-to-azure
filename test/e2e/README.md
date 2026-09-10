@@ -40,30 +40,23 @@ hand-authored Next.js tree you can edit.
 
 | fixture | trigger | adds capability | resources | compile | what-if |
 | --- | --- | --- | --- | --- | --- |
-| `next-minimal`         | `next` dep + `next.config.mjs` | web-compute | app-env, web | ✅ pass | ❌ fail (bug2) |
-| `next-prisma-postgres` | `prisma/schema.prisma` (postgresql) | + transactional-relational | + postgres, postgres-db | ✅ pass | ❌ fail (bug2) |
-| `next-openai`          | `app/api/chat/route.ts` (gpt-4o) | + chat-model | + openai, openai-deploy-gpt-4o | ❌ fail (bug1) | — n/a |
-| `next-blob-storage`    | `lib/blob.ts` (`BlobServiceClient`) | + object-storage | + storage, blob | ✅ pass | ❌ fail (bug2) |
+| `next-minimal`         | `next` dep + `next.config.mjs` | web-compute | app-env, web | ✅ pass | ✅ pass |
+| `next-prisma-postgres` | `prisma/schema.prisma` (postgresql) | + transactional-relational | + postgres, postgres-db | ✅ pass | ✅ pass |
+| `next-openai`          | `app/api/chat/route.ts` (gpt-4o) | + chat-model | + openai, openai-deploy-gpt-4o-62gtzg | ✅ pass | ⚠️ catalog-dependent |
+| `next-blob-storage`    | `lib/blob.ts` (`BlobServiceClient`) | + object-storage | + storage, blob | ✅ pass | ✅ pass |
 
 `expectations.json` is the source of truth and was **derived from validated `azx plan
 --json` output**, not hand-predicted.
 
 ---
 
-## Two azx codegen bugs the harness documents (`src/bicep.ts`)
+## Gate status
 
-- **bug1 (compile):** `Microsoft.CognitiveServices/accounts` emits
-  `customSubDomainName: name` — a bare, undeclared identifier → **BCP057**. Every
-  chat-model app (`next-openai`) fails `az bicep build` until this is fixed.
-- **bug2 (what-if):** `Microsoft.App/containerApps` emits an empty `containers: []`
-  with cpu/mem `0`. It *compiles* fine but fails Azure's what-if preflight
-  (`ContainerAppCreateMustContainContainer`). Every app has a `web` container app, so
-  what-if fails for all of them — which is exactly why the harness keeps the compile
-  and what-if gates **separate**.
-
-Fixing either bug means changing `src/bicep.ts` and regenerating goldens
-(`UPDATE_GOLDENS=1 npm test`), then flipping the corresponding gate(s) in
-`expectations.json`. Offered as a follow-up, not done here.
+The original Cognitive Services subdomain and empty Container Apps template bugs are
+fixed. All fixtures compile, and the standard fixtures pass Azure what-if when optional
+OIDC variables are configured. The `next-openai` what-if remains catalog-dependent:
+Azure can reject a correctly generated deployment when the requested model version is
+retired in the selected region.
 
 ---
 

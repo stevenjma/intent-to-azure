@@ -28,7 +28,7 @@
         { "id": "app-env", "type": "Microsoft.App/managedEnvironments" },
         { "id": "web", "type": "Microsoft.App/containerApps" },
         { "id": "openai", "type": "Microsoft.CognitiveServices/accounts" },
-        { "id": "openai-deploy-gpt-4o", "type": "Microsoft.CognitiveServices/accounts/deployments" }
+        { "id": "openai-deploy-gpt-4o-62gtzg", "type": "Microsoft.CognitiveServices/accounts/deployments" }
       ],
       "compile": "pass",
       "whatif": "fail",

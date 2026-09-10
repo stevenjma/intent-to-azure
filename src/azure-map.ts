@@ -29,7 +29,28 @@ export interface MapContext {
 
 /** Sanitize a model id into an Azure deployment name. */
 function deploymentName(model: string): string {
-  return model.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  let sanitized = "";
+  for (const char of model.toLowerCase()) {
+    const code = char.charCodeAt(0);
+    const allowed = (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || char === "-";
+    if (allowed) {
+      sanitized += char;
+    } else if (sanitized.length > 0 && !sanitized.endsWith("-")) {
+      sanitized += "-";
+    }
+  }
+  let start = 0;
+  let end = sanitized.length;
+  while (start < end && sanitized[start] === "-") start++;
+  while (end > start && sanitized[end - 1] === "-") end--;
+  const clean = sanitized.slice(start, end) || "model";
+  let h = 2166136261;
+  for (let i = 0; i < model.length; i++) h = Math.imul(h ^ model.charCodeAt(i), 16777619);
+  const suffix = (h >>> 0).toString(36).slice(0, 8);
+  const prefix = clean.slice(0, 63 - suffix.length);
+  let prefixEnd = prefix.length;
+  while (prefixEnd > 0 && prefix[prefixEnd - 1] === "-") prefixEnd--;
+  return `${prefix.slice(0, prefixEnd) || "model"}-${suffix}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,7 +153,7 @@ export function buildChatModel(need: Need, ctx: MapContext, approvedModels?: str
     region: ctx.region,
     capability: "chat-model",
     estimatedMonthlyUsd: 0,
-    notes: ["Token usage is billed per-1K tokens; the fixed cost is $0. Confirm model availability in the chosen region."],
+    notes: ["Usage is billed per token. The $0 modeled fixed cost is not a spend cap; actual consumption is unbounded."],
     properties: { kind: "OpenAI" },
   };
 

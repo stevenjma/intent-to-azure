@@ -19,7 +19,7 @@ const COPIES: ReadonlyArray<readonly [string, string]> = [
   ["web/github.js", `"${CANONICAL_SCOPES}"`],
   ["web/worker/github-oauth-worker.js", `"${CANONICAL_SCOPES}"`],
   // pages.yml drives production config.js; the operator-overridable default lives here.
-  [".github/workflows/pages.yml", `\${GH_SCOPES:-${CANONICAL_SCOPES}}`],
+  [".github/workflows/pages.yml", `process.env.GH_SCOPES?.trim() || "${CANONICAL_SCOPES}"`],
 ];
 
 for (const [relPath, expected] of COPIES) {

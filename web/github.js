@@ -4,7 +4,8 @@
  * OAuth: a static page can't do the code→token exchange (needs the client secret +
  * the token endpoint is CORS-blocked), so we bounce through a tiny token-exchange
  * Worker (see web/worker/). The Worker holds the secret, does the exchange, and
- * posts the user token back to this window. We keep the token in memory only.
+ * redirects the token to the exact app path. A local bootstrap validates and strips
+ * the fragment before this module or any third-party module loads.
  *
  * Repo read: enumerate the git tree, pull text blobs into a Map<path, contents> —
  * the exact shape the browser engine's scanFileMap() consumes.
@@ -18,18 +19,18 @@ const API = "https://api.github.com";
 // Mirror the CLI's read-repo caps so browser scans match disk scans in spirit.
 const TEXT_EXT = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".py", ".rb", ".go",
-  ".rs", ".java", ".cs", ".php", ".yaml", ".yml", ".toml", ".env", ".txt",
+  ".rs", ".java", ".cs", ".php", ".yaml", ".yml", ".toml", ".txt",
   ".md", ".lock", ".sh", ".dockerfile", ".prisma", ".sql", ".html", ".css",
 ]);
 const INTERESTING = new Set([
   "package.json", "package-lock.json", "requirements.txt", "pyproject.toml",
-  "Dockerfile", "docker-compose.yml", "docker-compose.yaml", ".env", ".env.example",
+  "Dockerfile", "docker-compose.yml", "docker-compose.yaml", ".env.example",
   "next.config.js", "next.config.mjs", "go.mod", "Gemfile", "pom.xml",
 ]);
 const MAX_FILE_BYTES = 1_500_000;
 const MAX_BLOB_FETCHES = 400;
 
-/** In-memory token + user, never persisted. */
+/** Runtime token + user; credentials intentionally remain memory-only. */
 let token = null;
 let user = null;
 
@@ -50,109 +51,30 @@ export function __setAuth(authToken, authUser) {
 }
 
 // --------------------------------------------------------------------------
-// Session persistence + OAuth redirect fallback
+// OAuth redirect handling
 // --------------------------------------------------------------------------
 
-/** Tab-scoped storage keys (sessionStorage: survives reload, dies on tab close). */
-const SESSION_KEY = "azx.gh.session";
 const OAUTH_STATE_KEY = "azx.gh.oauth_state";
-/** Max lifetime we keep a restored GitHub session before forcing a fresh sign-in. */
-const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
 
 /** URL-safe base64 (ASCII input — our own origin+path). */
 function b64urlEncode(s) {
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** Save the current token+user to this tab so a reload stays signed in. */
-function persistSession() {
-  try {
-    if (!token) return;
-    sessionStorage.setItem(
-      SESSION_KEY,
-      JSON.stringify({ token, user, exp: Date.now() + SESSION_TTL_MS }),
-    );
-  } catch {
-    /* storage unavailable — stay in-memory only */
-  }
-}
-
-function clearSession() {
-  try {
-    sessionStorage.removeItem(SESSION_KEY);
-  } catch {
-    /* ignore */
-  }
-}
-
-/**
- * Rehydrate a GitHub session saved in this tab. Survives page reload; cleared on
- * tab close or once SESSION_TTL_MS elapses. Validates the token with a /user call
- * so a revoked or expired token can't leave a half-signed-in UI. Returns the user
- * or null.
- */
 export async function restoreGithubSession() {
-  let rec;
-  try {
-    const raw = sessionStorage.getItem(SESSION_KEY);
-    if (!raw) return null;
-    rec = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!rec?.token || !rec?.exp || Date.now() > rec.exp) {
-    clearSession();
-    return null;
-  }
-  token = rec.token;
-  try {
-    user = await gh("/user");
-    return user;
-  } catch {
-    githubSignOut();
-    return null;
-  }
-}
-
-/** Drop any auth data left in the address bar / history after a redirect return. */
-function stripAuthFragment() {
-  try {
-    window.history.replaceState(null, "", window.location.pathname + window.location.search);
-  } catch {
-    /* ignore */
-  }
+  return null;
 }
 
 /**
- * Complete a redirect-based GitHub sign-in on page load. When popups are blocked
- * the whole tab goes through the Worker + GitHub, and the Worker redirects back
- * here with the token in the URL fragment. We read it, strip it from history
- * immediately (so the token isn't left in the address bar), verify the CSRF
- * state, then fetch the user. No-op when there's no auth fragment present.
+ * Complete a redirect-based GitHub sign-in from the bootstrap's validated,
+ * already-removed fragment payload. No-op when no OAuth result is pending.
  */
-export async function handleGithubRedirect() {
-  const hash = window.location.hash || "";
-  if (!/azx_gh_(token|error)=/.test(hash)) return null;
-  const params = new URLSearchParams(hash.replace(/^#/, ""));
-  const tok = params.get("azx_gh_token");
-  const err = params.get("azx_gh_error");
-  const state = params.get("state");
-  stripAuthFragment();
-  let expected = null;
-  try {
-    expected = sessionStorage.getItem(OAUTH_STATE_KEY);
-    sessionStorage.removeItem(OAUTH_STATE_KEY);
-  } catch {
-    /* ignore */
-  }
-  if (err) throw new Error(`GitHub sign-in failed: ${err}`);
-  if (!tok) return null;
-  if (!expected || state !== expected) {
-    throw new Error("GitHub OAuth state mismatch — aborting.");
-  }
-  token = tok;
+export async function handleGithubRedirect(result) {
+  if (!result) return null;
+  if (result.error) throw new Error(`GitHub sign-in failed: ${result.error}`);
+  if (!result.token) return null;
+  token = result.token;
   user = await gh("/user");
-  persistSession();
   return user;
 }
 
@@ -166,6 +88,9 @@ function ext(path) {
 function wantFile(path, size) {
   const base = path.slice(path.lastIndexOf("/") + 1);
   if (size > MAX_FILE_BYTES) return false;
+  // Never download live dotenv files. Examples are intentionally retained as
+  // schema/signals, but `.env`, `.env.local`, `.env.production`, etc. may be secrets.
+  if (/^\.env(?:\.|$)/i.test(base) && !/^\.env\.example$/i.test(base)) return false;
   return INTERESTING.has(base) || TEXT_EXT.has(ext(path));
 }
 
@@ -195,7 +120,7 @@ function orgRestriction(status, message, path) {
   return { org, grantUrl: orgGrantUrl(org) };
 }
 
-async function gh(path, { method = "GET", body, raw = false } = {}) {
+async function gh(path, { method = "GET", body, raw = false, signal } = {}) {
   const headers = { Accept: "application/vnd.github+json" };
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body) headers["Content-Type"] = "application/json";
@@ -203,6 +128,7 @@ async function gh(path, { method = "GET", body, raw = false } = {}) {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   });
   if (!res.ok) {
     let detail = "";
@@ -221,13 +147,10 @@ async function gh(path, { method = "GET", body, raw = false } = {}) {
 }
 
 /**
- * Kick off GitHub OAuth. Default path is a popup to the Worker's /login, which
- * redirects to GitHub, exchanges the code, and postMessages
- * `{ type: "azx-github-token", token, state }` back here. If the browser blocks
- * the popup (embedded webviews, strict blockers), we fall back to a full-page
- * redirect: the Worker bounces the token back in the URL fragment and boot's
- * handleGithubRedirect resumes it. The CSRF state encodes the mode (`.p`/`.r`)
- * and, for redirect mode, our own return URL so the Worker knows where to return.
+ * Kick off GitHub OAuth as a full-page redirect. GitHub Pages project sites share
+ * an origin, so popup postMessage delivery cannot distinguish this app from another
+ * project under the same account. Redirect delivery lets the Worker enforce the
+ * exact application path before placing the token in a URL fragment.
  */
 export function githubSignIn(config) {
   return new Promise((resolve, reject) => {
@@ -238,69 +161,26 @@ export function githubSignIn(config) {
     const csrf = crypto.randomUUID();
     const scope = config.githubScopes || "repo workflow read:user";
     const base = config.githubWorkerUrl.replace(/\/$/, "");
-    const workerOrigin = new URL(config.githubWorkerUrl).origin;
-
-    const popupState = `${csrf}.p`;
-    const loginUrl =
-      `${base}/login?state=${encodeURIComponent(popupState)}&scope=${encodeURIComponent(scope)}`;
-
-    const popup = window.open(loginUrl, "azx-github-oauth", "width=560,height=720");
-    if (!popup) {
-      // Popup blocked: full-page redirect fallback. Carry our return URL in the
-      // state (base64url) so the Worker can bounce the token back to this exact
-      // page; the Worker validates it against ALLOWED_ORIGIN to prevent open
-      // redirects. We stash the full state for CSRF check on return.
-      const returnUrl = window.location.origin + window.location.pathname;
-      const redirectState = `${csrf}.r.${b64urlEncode(returnUrl)}`;
-      try {
-        sessionStorage.setItem(OAUTH_STATE_KEY, redirectState);
-      } catch {
-        /* ignore */
-      }
-      const redirUrl =
-        `${base}/login?state=${encodeURIComponent(redirectState)}&scope=${encodeURIComponent(scope)}`;
-      const redirecting = new Error("Redirecting to GitHub…");
-      redirecting.redirecting = true;
-      reject(redirecting);
-      window.location.assign(redirUrl);
+    const returnUrl = new URL(".", window.location.href).href;
+    const redirectState = `${csrf}.r.${b64urlEncode(returnUrl)}`;
+    try {
+      sessionStorage.setItem(OAUTH_STATE_KEY, redirectState);
+    } catch {
+      reject(new Error("GitHub sign-in requires sessionStorage for OAuth state validation."));
       return;
     }
-
-    const onMessage = async (ev) => {
-      if (ev.origin !== workerOrigin) return;
-      const data = ev.data || {};
-      if (data.type !== "azx-github-token") return;
-      window.removeEventListener("message", onMessage);
-      try {
-        popup.close();
-      } catch {
-        /* ignore */
-      }
-      if (data.error) {
-        reject(new Error(`GitHub sign-in failed: ${data.error}`));
-        return;
-      }
-      if (data.state !== popupState) {
-        reject(new Error("GitHub OAuth state mismatch — aborting."));
-        return;
-      }
-      token = data.token;
-      try {
-        user = await gh("/user");
-        persistSession();
-        resolve(user);
-      } catch (err) {
-        reject(err);
-      }
-    };
-    window.addEventListener("message", onMessage);
+    const loginUrl =
+      `${base}/login?state=${encodeURIComponent(redirectState)}&scope=${encodeURIComponent(scope)}`;
+    const redirecting = new Error("Redirecting to GitHub…");
+    redirecting.redirecting = true;
+    reject(redirecting);
+    window.location.assign(loginUrl);
   });
 }
 
 export function githubSignOut() {
   token = null;
   user = null;
-  clearSession();
 }
 
 /**
@@ -353,16 +233,16 @@ export async function searchRepos(query) {
 }
 
 /** Resolve `owner/repo` (+ optional ref) → { files: Map, defaultBranch, truncated }. */
-export async function fetchRepoFiles(ownerRepo, ref) {
+export async function fetchRepoFiles(ownerRepo, ref, { signal } = {}) {
   const [owner, repo] = ownerRepo.split("/").map((s) => s.trim());
   if (!owner || !repo) throw new Error('Enter a repo as "owner/repo".');
 
-  const meta = await gh(`/repos/${owner}/${repo}`);
+  const meta = await gh(`/repos/${owner}/${repo}`, { signal });
   const branch = ref && ref.trim() ? ref.trim() : meta.default_branch;
-  const branchInfo = await gh(`/repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}`);
+  const branchInfo = await gh(`/repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}`, { signal });
   const treeSha = branchInfo.commit.commit.tree.sha;
 
-  const tree = await gh(`/repos/${owner}/${repo}/git/trees/${treeSha}?recursive=1`);
+  const tree = await gh(`/repos/${owner}/${repo}/git/trees/${treeSha}?recursive=1`, { signal });
   const blobs = (tree.tree || []).filter(
     (n) => n.type === "blob" && wantFile(n.path, n.size ?? 0),
   );
@@ -376,7 +256,7 @@ export async function fetchRepoFiles(ownerRepo, ref) {
       break;
     }
     fetches++;
-    const blob = await gh(`/repos/${owner}/${repo}/git/blobs/${node.sha}`);
+    const blob = await gh(`/repos/${owner}/${repo}/git/blobs/${node.sha}`, { signal });
     const contents =
       blob.encoding === "base64" ? decodeBase64Utf8(blob.content) : blob.content ?? "";
     files.set(node.path, contents);
@@ -424,7 +304,7 @@ async function gitWrite(path, body, method = "POST") {
   return provisioningRetry(() => gh(path, { method, body }));
 }
 
-async function createOrResetBranch(repoPath, branch, sha) {
+async function createBranchOrReuse(repoPath, branch, sha) {
   let lastErr;
   for (let i = 0; i < 8; i++) {
     try {
@@ -437,12 +317,9 @@ async function createOrResetBranch(repoPath, branch, sha) {
       lastErr = err;
       if (err.status === 422) {
         try {
+          // A retry continues from azx's existing branch. Never force-move a ref:
+          // doing so can discard commits made after an earlier attempt.
           await gh(`${repoPath}/git/ref/heads/${branch}`);
-          await gitWrite(
-            `${repoPath}/git/refs/heads/${branch}`,
-            { sha, force: true },
-            "PATCH",
-          );
           return;
         } catch (refErr) {
           if (refErr.status && refErr.status !== 404 && refErr.status !== 409) throw refErr;
@@ -485,13 +362,13 @@ function encodeRepoPath(path) {
  * We deliberately do NOT use `auto_init`. The base commit and every scaffold
  * file are written through the Contents API, avoiding the independently
  * replicated git-data blob/tree/commit endpoints that can still report an empty
- * repository after the seed commit succeeds. Git-data is used only to create or
- * reset the feature branch ref, with exponential retry while it becomes visible.
+ * repository after the seed commit succeeds. Git-data is used only to create
+ * the feature branch ref, with exponential retry while it becomes visible.
  *
  * The whole flow is idempotent: a prior failed run can leave behind an empty
  * repo the SPA can't delete (no `delete_repo` scope), so on a name-conflict 422
  * we reuse the existing repo, seed the base branch only if it's empty,
- * create-or-fast-forward the `azx-infra` branch, and create-or-reuse the PR.
+ * continue the existing `azx-infra` branch, and create-or-reuse the PR.
  *
  * Returns { htmlUrl, prUrl, owner, name, branch, base, login }.
  */
@@ -517,23 +394,56 @@ export async function createRepoAndPush(repoName, isPrivate, scaffoldFiles, comm
   // git-data write fails), and the SPA has no `delete_repo` scope to clean it
   // up. So on a name-conflict 422 we fetch the existing repo and continue
   // idempotently rather than dead-ending the user.
+  const incompleteMarker = "azx-incomplete-repository-v1";
   let repo;
+  let reused = false;
   try {
     repo = await gh(createPath, {
       method: "POST",
-      body: { name: rawName, private: Boolean(isPrivate), auto_init: false },
+      body: {
+        name: rawName,
+        private: Boolean(isPrivate),
+        auto_init: false,
+        description: incompleteMarker,
+      },
     });
   } catch (err) {
     if (err.status !== 422) throw err;
     const existing = await gh(`/repos/${ownerPath}/${rawName}`).catch(() => null);
     if (!existing) throw err; // 422 for some other reason (name policy, perms, quota).
+    if (existing.description !== incompleteMarker) {
+      throw new Error(
+        `Repository ${ownerPath}/${rawName} already exists and was not created by an incomplete azx run. Choose a new name.`,
+      );
+    }
     repo = existing;
+    reused = true;
   }
   // Always follow up against the repo's REAL owner/name, never the raw input.
   const owner = repo.owner.login;
   const name = repo.name;
   const base = repo.default_branch || "main";
   const R = `/repos/${owner}/${name}`;
+
+  if (reused) {
+    // The marker proves provenance; constrain its history to the branches azx
+    // itself creates so a user-modified or unrelated repository is never reused.
+    const branches = await gh(`${R}/branches?per_page=100`).catch((err) => {
+      if (err.status === 409) return [];
+      throw err;
+    });
+    if (branches.some((b) => b.name !== base && b.name !== "azx-infra")) {
+      throw new Error(`Repository ${owner}/${name} is no longer an incomplete azx repository.`);
+    }
+    if (branches.some((b) => b.name === "azx-infra")) {
+      const feature = await gh(`${R}/branches/azx-infra`);
+      const tree = await gh(`${R}/git/trees/${feature.commit.commit.tree.sha}?recursive=1`);
+      const allowedPaths = new Set(["README.md", ...scaffoldFiles.map((f) => String(f.path))]);
+      if ((tree.tree || []).some((n) => n.type === "blob" && !allowedPaths.has(n.path))) {
+        throw new Error(`Repository ${owner}/${name} contains files outside the incomplete azx scaffold.`);
+      }
+    }
+  }
 
   // 1. Base branch: ensure the default branch has an initial commit. Reuse it if
   //    a prior run already seeded it; otherwise create it via the Contents API —
@@ -546,8 +456,20 @@ export async function createRepoAndPush(repoName, isPrivate, scaffoldFiles, comm
   } catch (err) {
     if (err.status !== 404 && err.status !== 409) throw err; // empty repo → seed below.
   }
+  const readme = `# ${name}\n\nAzure infrastructure generated by azx.\n`;
+  if (baseCommitSha && reused) {
+    const existingReadme = await gh(`${R}/contents/README.md?ref=${encodeURIComponent(base)}`).catch(
+      () => null,
+    );
+    const contents =
+      existingReadme?.encoding === "base64"
+        ? decodeBase64Utf8(existingReadme.content)
+        : existingReadme?.content;
+    if (contents !== readme) {
+      throw new Error(`Repository ${owner}/${name} default branch is not an azx seed.`);
+    }
+  }
   if (!baseCommitSha) {
-    const readme = `# ${name}\n\nAzure infrastructure generated by azx.\n`;
     try {
       const seed = await contentsPut(`${R}/contents/README.md`, {
         message: "azx: initialize repository",
@@ -564,10 +486,10 @@ export async function createRepoAndPush(repoName, isPrivate, scaffoldFiles, comm
     }
   }
 
-  // 2. Feature branch: create it from the base commit, or reset an existing
-  //    branch so a retried Codify run produces exactly the requested scaffold.
+  // 2. Feature branch: create it from the base commit, or continue an existing
+  //    branch from a positively identified incomplete run without moving its ref.
   const branch = "azx-infra";
-  await createOrResetBranch(R, branch, baseCommitSha);
+  await createBranchOrReuse(R, branch, baseCommitSha);
 
   // Write files sequentially because each Contents API call advances the branch.
   // If a scaffold path already exists on the base branch, GitHub requires its
@@ -587,8 +509,18 @@ export async function createRepoAndPush(repoName, isPrivate, scaffoldFiles, comm
         gh(`${contentPath}?ref=${encodeURIComponent(branch)}`),
       ).catch(() => null);
       if (!existing || !existing.sha) throw err;
-      await contentsPut(contentPath, { ...body, sha: existing.sha });
+      const existingContent =
+        existing.encoding === "base64" ? decodeBase64Utf8(existing.content) : existing.content;
+      const resolution = scaffoldConflictResolution(f.path, existingContent, f.contents, readme);
+      if (resolution === "replace-seed") {
+        await contentsPut(contentPath, { ...body, sha: existing.sha });
+      } else if (resolution === "conflict") {
+        throw new Error(
+          `Repository ${owner}/${name} contains a modified scaffold file at ${f.path}; refusing to overwrite it.`,
+        );
+      }
     }
+
   }
 
   // 3. Open the PR into the default branch — or reuse an open one from a prior run.
@@ -616,6 +548,12 @@ export async function createRepoAndPush(repoName, isPrivate, scaffoldFiles, comm
     pr = open[0];
   }
 
+  // A completed repo must never be mistaken for an incomplete retry target.
+  await gh(R, {
+    method: "PATCH",
+    body: { description: "Azure infrastructure generated by azx." },
+  });
+
   return {
     htmlUrl: repo.html_url,
     prUrl: pr.html_url,
@@ -625,4 +563,10 @@ export async function createRepoAndPush(repoName, isPrivate, scaffoldFiles, comm
     base,
     login: me.login,
   };
+}
+
+export function scaffoldConflictResolution(path, existingContent, generatedContent, seedReadme) {
+  if (existingContent === generatedContent) return "skip";
+  if (path === "README.md" && existingContent === seedReadme) return "replace-seed";
+  return "conflict";
 }

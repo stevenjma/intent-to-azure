@@ -18,6 +18,7 @@ import { dirname, join, resolve } from "node:path";
 
 import type { AppIntent, AzurePlan } from "./types.js";
 import { buildScaffold, slugify, type ScaffoldFile, type ScaffoldOptions } from "./scaffold.js";
+import { blockingConfirmations } from "./plan.js";
 
 /** One planned/executed shell step. */
 export interface ShipStep {
@@ -38,6 +39,8 @@ export interface ShipOptions extends ScaffoldOptions {
   deploy?: boolean;
   /** Local directory to write the scaffold into (defaults to a repo-named dir). */
   outDir?: string;
+  /** Explicitly accept confirmation cards that state a concrete assumption. */
+  acceptAssumptions?: boolean;
 }
 
 export interface ShipPlan {
@@ -108,6 +111,12 @@ export function shipSteps(
   bicep: string,
   opts: ShipOptions = {},
 ): ShipPlan {
+  if (opts.deploy) {
+    throw new Error(
+      "--deploy cannot be used while creating a new repo: OIDC variables do not exist yet. " +
+        "Create/push the repo, run scripts/setup-azure-oidc.sh, then trigger deploy.yml.",
+    );
+  }
   const files = buildScaffold(intent, plan, bicep, opts);
   const outDir = shipOutDir(intent, opts);
   const visibility = opts.visibility ?? "private";
@@ -145,13 +154,6 @@ export function shipSteps(
       ],
       description: `create the GitHub repo ${opts.repo} and push`,
     });
-    if (opts.deploy) {
-      steps.push({
-        cmd: "gh",
-        args: ["workflow", "run", "deploy.yml", "--repo", opts.repo],
-        description: "trigger the deploy pipeline (runs the real Azure deploy)",
-      });
-    }
   }
 
   return { files, steps, outDir, repo: opts.repo };
@@ -181,6 +183,13 @@ export function runShip(
   opts: ShipOptions = {},
   runner: CommandRunner = defaultRunner(),
 ): ShipResult {
+  const unresolved = blockingConfirmations(plan, opts.acceptAssumptions);
+  if (unresolved.length) {
+    throw new Error(
+      `refusing to ship with ${unresolved.length} unresolved confirmation(s): ${unresolved.map((c) => c.id).join(", ")}. ` +
+        "Resolve them in the App Intent/guardrails and regenerate the plan.",
+    );
+  }
   const planned = shipSteps(intent, plan, bicep, opts);
 
   // Refuse to publish into a dir that already holds files we don't own: `runShip`

@@ -26,6 +26,8 @@
           https://github.com
           https://esm.sh;
         frame-src https://login.microsoftonline.com;
+        object-src 'none';
+        upgrade-insecure-requests;
         base-uri 'none';
         form-action 'none';
       "
@@ -132,6 +134,15 @@
           <pre id="bicep-view" class="code"></pre>
         </details>
 
+        <div id="confirmation-gate" class="note hidden">
+          <strong>Assumptions require approval</strong>
+          <ul id="confirmation-list"></ul>
+          <label>
+            <input id="confirm-assumptions" type="checkbox" />
+            I reviewed and accept these assumptions for this analysis.
+          </label>
+        </div>
+
         <h3 class="actions-head">Proceed</h3>
         <div class="actions">
           <div class="action-card primary">
@@ -147,7 +158,8 @@
             <h4>Preview on Azure (what-if)</h4>
             <p class="hint">
               Runs a real ARM what-if against your subscription, then optionally deploys
-              now — a live, disposable preview.
+              now. If the resource group does not exist, you must approve creating that
+              prerequisite before preview.
             </p>
             <div id="deploy-reason" class="reason hidden"></div>
             <button id="go-deploy" class="btn" type="button">Preview &amp; deploy →</button>
@@ -191,7 +203,8 @@
         <h2>Deploy to Azure</h2>
         <p class="hint">
           Runs a real ARM <strong>what-if</strong> preview first (always), then deploys
-          only after you review and confirm. Requires Azure sign-in.
+          only after you review and confirm. What-if itself does not change app resources;
+          creating a missing prerequisite resource group is separately disclosed and confirmed.
         </p>
         <div class="deploy-controls">
           <label>
@@ -225,12 +238,12 @@
     <footer class="foot">
       <span
         >Offline preview runs entirely in your browser. Deploy talks directly to Azure
-        Resource Manager; repo push talks directly to GitHub. Tokens are held in memory
-        only and never persisted.</span
+        Resource Manager; repo push talks directly to GitHub. Tokens are held only in
+        tab-scoped session storage and are cleared on sign-out or tab close.</span
       >
     </footer>
 
     <script src="./config.js?v=20260818a"></script>
-    <script type="module" src="./app.js?v=20260818a"></script>
+    <script type="module" src="./bootstrap.js?v=20260910b"></script>
   </body>
 </html>

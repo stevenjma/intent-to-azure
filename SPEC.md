@@ -163,6 +163,10 @@ notes:
   - "EU data-residency: Europe regions only."
 ```
 
+An absent implicit file is optional. An existing or explicitly supplied file is strict:
+malformed YAML, non-mapping roots, unknown fields, and invalid recognized values stop
+planning with a path-qualified error.
+
 Budget context is mocked from `.azx/subscription.json` (no real Azure call):
 
 ```json
@@ -183,7 +187,8 @@ Resolving an App Intent yields an `AzurePlan`: a `resources[]` graph (each with
 emits a deterministic `main.bicep` from that graph.
 
 Full response = `{ intent, plan }` (see `IntentResponse`), plus `bicep` from the
-CLI. **POC #1 is generate + preview only — `dryRun: true`, no Azure calls.**
+CLI. Plans remain previews (`dryRun: true`). Real deployment is explicit and
+fails closed while confirmation cards or blocking guardrails remain unresolved.
 
 ---
 

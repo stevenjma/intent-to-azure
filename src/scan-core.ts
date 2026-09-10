@@ -486,13 +486,15 @@ const IMPORT_RULES: ImportRule[] = [
   { re: /from\s+fastapi\s+import|FastAPI\(/i, cap: "web-compute", conclusion: "web-compute (FastAPI app object)", provider: undefined },
 ];
 
-/** Recognized model identifiers, captured so guardrails can vet them later. */
+/** Model identifiers, including runtime/new catalog names unknown to this release. */
 const MODEL_RE =
   /\b(gpt-4o(?:-mini)?|gpt-4\.1(?:-mini|-nano)?|gpt-4-turbo|gpt-4|gpt-3\.5-turbo|o1(?:-mini|-preview)?|o3(?:-mini)?|text-embedding-3-(?:small|large)|text-embedding-ada-002|claude-3(?:\.5)?-(?:opus|sonnet|haiku)[a-z0-9-]*)\b/gi;
+const MODEL_LITERAL_RE = /\bmodel\s*(?::|=)\s*["']([^"'\\\r\n]{1,128})["']/gi;
 
 function extractModels(text: string): string[] {
   const found = new Set<string>();
   for (const m of text.matchAll(MODEL_RE)) found.add(m[1] ?? m[0]);
+  for (const m of text.matchAll(MODEL_LITERAL_RE)) found.add(m[1]!);
   return [...found].sort();
 }
 
