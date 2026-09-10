@@ -19,7 +19,9 @@ const SUB = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 
 function repoWithCorruptLedger(): string {
   const root = mkdtempSync(join(tmpdir(), "azx-recover-"));
-  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "recover-me", dependencies: {} }));
+  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "recover-me", dependencies: { next: "14.0.0" } }));
+  writeFileSync(join(root, "next.config.mjs"), "export default {};\n");
+  writeFileSync(join(root, "guardrails.yaml"), "regions: [eastus2]\n");
   mkdirSync(join(root, ".azx"), { recursive: true });
   writeFileSync(join(root, ".azx", "deploy.json"), "{ this is not valid json");
   return root;

@@ -16,7 +16,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { readFileSync, writeFileSync, readSync, mkdirSync, mkdtempSync } from "node:fs";
+import { readFileSync, writeFileSync, readSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { basename, resolve, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -95,6 +95,13 @@ function main(argv: string[]): number {
   const values = parsed.values as Values;
   const positionals = parsed.positionals;
   const color = makeColor(!values["no-color"] && !process.env.NO_COLOR && process.stdout.isTTY);
+  if (values["pg-password"] !== undefined) {
+    process.stderr.write(
+      "azx: --pg-password is refused because command-line arguments can expose secrets. " +
+        "Set AZX_PG_PASSWORD in the environment instead.\n",
+    );
+    return 2;
+  }
 
   if (values.version) {
     process.stdout.write(readVersion() + "\n");
@@ -142,8 +149,9 @@ function main(argv: string[]): number {
 // ---------------------------------------------------------------------------
 
 function loadInputs(root: string, values: Values): { guardrails?: Guardrails; budget?: BudgetContext } {
-  const guardrails = values.guardrails
-    ? parseGuardrails(readFileSync(resolve(values.guardrails), "utf8"))
+  const guardrailPath = values.guardrails ? resolve(values.guardrails) : undefined;
+  const guardrails = guardrailPath
+    ? parseGuardrails(readFileSync(guardrailPath, "utf8"), guardrailPath)
     : loadGuardrails(root);
   let budget: BudgetContext | undefined;
   if (values.subscription) {
@@ -442,7 +450,8 @@ function loadLedgerWithRecovery(
 
 /**
  * `azx up <path> --local-deploy [--yes] [--resource-group r] [--region x]
- *                               [--pg-password p] [--subscription-id id]`
+ *                               [--subscription-id id]`
+ * PostgreSQL credentials are read only from `AZX_PG_PASSWORD`.
  *
  * The imperative inner loop: `az` really creates the resources. What-if is always
  * previewed first; the real apply only happens with --yes. On success it writes
@@ -457,6 +466,7 @@ function cmdLocalDeploy(
   values: Values,
   c: Color,
 ): number {
+  if (hasBlockingConfirmations(plan)) return renderConfirmationBlock("deploy", intent, plan, values, c);
   if (plan.budget.blocked) {
     process.stdout.write(banner(c, `deploy ${intent.app.name}`));
     process.stdout.write(c.red("\n✗ Blocked by budget guardrail — refusing to deploy.\n"));
@@ -508,7 +518,8 @@ function cmdLocalDeploy(
 
   // The `az deployment` calls need main.bicep on disk. Write it to a throwaway
   // temp dir so we never pollute the user's repo; only the ledger lands in .azx/.
-  const bicepPath = join(mkdtempSync(join(tmpdir(), "azx-deploy-")), "main.bicep");
+  const bicepDir = mkdtempSync(join(tmpdir(), "azx-deploy-"));
+  const bicepPath = join(bicepDir, "main.bicep");
   writeFileSync(bicepPath, bicep);
 
   let result;
@@ -518,7 +529,7 @@ function cmdLocalDeploy(
       resourceGroup: rg,
       region,
       subscriptionId,
-      pgPassword: values["pg-password"],
+      pgPassword: process.env.AZX_PG_PASSWORD,
       apply,
     });
   } catch (err) {
@@ -564,6 +575,8 @@ function cmdLocalDeploy(
       }
     }
     return 1;
+  } finally {
+    rmSync(bicepDir, { recursive: true, force: true });
   }
 
   // Persist the ledger on a real apply so `ship` can adopt this deployment. A write
@@ -598,7 +611,11 @@ function cmdLocalDeploy(
     process.stdout.write("  " + c.green("✓") + " " + step + "\n");
   }
   if (result.applied) {
-    process.stdout.write("\n" + c.bold("Deployed.") + " Real Azure resources are live.\n");
+    process.stdout.write(
+      "\n" +
+        c.bold("Infrastructure provisioned.") +
+        " Azure resources are live; application code is not deployed. Compute uses placeholder images.\n",
+    );
     if (ledgerPath) {
       process.stdout.write(c.dim(`  ledger written to ${ledgerPath}\n`));
     } else if (ledgerWriteError) {
@@ -627,13 +644,19 @@ function cmdLocalDeploy(
  * pipeline), then:
  *   - default (no --create-repo): DRY RUN. Writes the scaffold to --out (or a
  *     repo-named dir) and prints the exact git/gh commands it *would* run.
- *   - --create-repo owner/name: creates + pushes a real GitHub repo via `gh`;
- *     with --deploy, also triggers the workflow so the pipeline does the real
- *     Azure deploy (via OIDC). azx itself still makes zero Azure calls.
+ *   - --create-repo owner/name: creates + pushes a real GitHub repo via `gh`.
+ *     OIDC must then be configured before the workflow can deploy.
  */
 function cmdShip(repoArg: string, values: Values, c: Color): number {
   const root = resolve(repoArg);
   const { intent, plan, bicep } = buildAll(root, values);
+  if (hasBlockingConfirmations(plan)) return renderConfirmationBlock("ship", intent, plan, values, c);
+  if (values.deploy) {
+    throw new Error(
+      "--deploy cannot honestly deploy a newly created repo before OIDC exists. " +
+        "Create it first, run scripts/setup-azure-oidc.sh, then run `gh workflow run deploy.yml --repo <owner/name>`.",
+    );
+  }
 
   let ledger: DeployLedger | undefined;
   let recovered = false;
@@ -746,7 +769,8 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
       process.stdout.write("  " + c.green("✓") + " " + step.description + "\n");
     }
     process.stdout.write(
-      "\n" + c.bold("Shipped.") + " The deploy pipeline now owns the real Azure deployment.\n",
+      "\n" + c.bold("Repository created.") + " Infrastructure code and a disabled-until-configured deploy pipeline were pushed.\n" +
+        c.dim("  No application code was wired or started; generated compute still uses placeholder images.\n"),
     );
     if (!values.deploy) {
       process.stdout.write(
@@ -783,9 +807,34 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
   process.stdout.write(
     "\n" +
       c.dim("Add --create-repo <owner/name> to create + push the repo (needs `gh` auth).\n") +
-      c.dim("Add --deploy to also trigger the pipeline (real Azure deploy via OIDC).\n"),
+      c.dim("After creation, run scripts/setup-azure-oidc.sh, then manually trigger deploy.yml.\n"),
   );
   return 0;
+}
+
+function hasBlockingConfirmations(plan: AzurePlan): boolean {
+  return plan.confirmations.some((confirmation) => confirmation.confidence !== "high");
+}
+
+function renderConfirmationBlock(
+  action: "deploy" | "ship",
+  intent: AppIntent,
+  plan: AzurePlan,
+  values: Values,
+  c: Color,
+): number {
+  const unresolved = plan.confirmations.filter((confirmation) => confirmation.confidence !== "high");
+  const message =
+    `refusing to ${action}: ${unresolved.length} medium/low confirmation(s) are unresolved. ` +
+    "Add explicit guardrails or update the App Intent, then regenerate the plan.";
+  if (values.json) {
+    process.stdout.write(JSON.stringify({ error: message, confirmations: unresolved }, null, 2) + "\n");
+  } else {
+    process.stdout.write(banner(c, `${action} ${intent.app.name}`));
+    process.stdout.write("\n" + c.red(`✗ ${message}`) + "\n");
+    for (const confirmation of unresolved) process.stdout.write(`  • ${confirmation.id}: ${confirmation.question}\n`);
+  }
+  return 1;
 }
 
 /** Render a ShipStep as a copy-pasteable command line. */
@@ -1066,12 +1115,12 @@ function printUsage(): void {
       "  --out <file|dir>       write Bicep/schema to a file, or the ship scaffold to a dir",
       "  --scaffold <dir>       plan: also write the full deploy repo tree (Bicep + CI/CD)",
       "  --create-repo <o/n>    ship: create + push a real GitHub repo (owner/name)",
-      "  --deploy               ship: trigger the deploy pipeline after push (real deploy)",
+      "  --deploy               refused for new repos; configure OIDC, then trigger deploy.yml",
       "  --private/--no-private ship: repo visibility (default: private)",
       "  --local-deploy         up: really deploy to Azure via `az` (needs `az login`)",
       "  --resource-group <rg>  up --local-deploy: target resource group (default rg-<app>)",
       "  --region <r>           up --local-deploy: target region (default: plan region)",
-      "  --pg-password <p>      up --local-deploy: PostgreSQL admin password (if provisioned)",
+      "  AZX_PG_PASSWORD        environment: PostgreSQL admin password (never child argv)",
       "  --subscription-id <id> up --local-deploy: pin the Azure subscription",
       "  --no-bicep             omit the Bicep block from 'plan' output",
       "  --no-color             disable ANSI color",

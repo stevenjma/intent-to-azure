@@ -1,0 +1,26 @@
+name: Production health
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Pages and OAuth Worker
+        env:
+          PAGE_URL: https://stevenjma.github.io/intent-to-azure/
+          WORKER_URL: ${{ vars.GH_WORKER_URL }}
+        run: |
+          set -euo pipefail
+          [ -n "$WORKER_URL" ] || { echo "::error::GH_WORKER_URL is unset"; exit 1; }
+          curl --fail --silent --show-error --location --max-time 20 "$PAGE_URL" |
+            grep -q "App Intent"
+          curl --fail --silent --show-error --location --max-time 20 \
+            "${WORKER_URL%/}/health" |
+            grep -q '"status":"ok"'

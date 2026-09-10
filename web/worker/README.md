@@ -27,6 +27,9 @@ exact origin (never `*`) and held in memory there — never persisted.
 
 2. Edit `wrangler.toml`:
    - `ALLOWED_ORIGIN` = your Pages **origin** (scheme + host only), e.g. `https://YOUR_USER.github.io`
+   - `APP_URL` = the exact app URL (including the project path and trailing slash),
+     e.g. `https://YOUR_USER.github.io/YOUR_REPO/`. Redirect OAuth returns are
+     restricted to this origin and path.
    - `GITHUB_CLIENT_ID` = the OAuth App client id
 
 3. Deploy and set the secret:
@@ -51,8 +54,8 @@ make it a two-command deploy. If you host elsewhere, add that origin to the SPA'
 ## Security notes
 
 - The secret is never sent to the browser and never committed (`wrangler secret`).
-- `postMessage` targetOrigin is pinned to `ALLOWED_ORIGIN`; a malicious page can't
-  receive the token.
-- The callback page's CSP blocks framing and external scripts.
+- OAuth results return only by redirect to the exact configured `APP_URL`; popup
+  `postMessage` delivery is intentionally unsupported because project sites can share
+  a host origin.
 - Consider restricting the Worker route to your Pages origin via a `Referer`/origin
   check if you want defense-in-depth against unsolicited `/login` hits.

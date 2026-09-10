@@ -108,6 +108,12 @@ export function shipSteps(
   bicep: string,
   opts: ShipOptions = {},
 ): ShipPlan {
+  if (opts.deploy) {
+    throw new Error(
+      "--deploy cannot be used while creating a new repo: OIDC variables do not exist yet. " +
+        "Create/push the repo, run scripts/setup-azure-oidc.sh, then trigger deploy.yml.",
+    );
+  }
   const files = buildScaffold(intent, plan, bicep, opts);
   const outDir = shipOutDir(intent, opts);
   const visibility = opts.visibility ?? "private";
@@ -145,13 +151,6 @@ export function shipSteps(
       ],
       description: `create the GitHub repo ${opts.repo} and push`,
     });
-    if (opts.deploy) {
-      steps.push({
-        cmd: "gh",
-        args: ["workflow", "run", "deploy.yml", "--repo", opts.repo],
-        description: "trigger the deploy pipeline (runs the real Azure deploy)",
-      });
-    }
   }
 
   return { files, steps, outDir, repo: opts.repo };
@@ -181,6 +180,13 @@ export function runShip(
   opts: ShipOptions = {},
   runner: CommandRunner = defaultRunner(),
 ): ShipResult {
+  const unresolved = plan.confirmations.filter((c) => c.confidence !== "high");
+  if (unresolved.length) {
+    throw new Error(
+      `refusing to ship with ${unresolved.length} unresolved confirmation(s): ${unresolved.map((c) => c.id).join(", ")}. ` +
+        "Resolve them in the App Intent/guardrails and regenerate the plan.",
+    );
+  }
   const planned = shipSteps(intent, plan, bicep, opts);
 
   // Refuse to publish into a dir that already holds files we don't own: `runShip`

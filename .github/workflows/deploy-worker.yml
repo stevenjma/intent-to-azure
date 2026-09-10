@@ -1,0 +1,28 @@
+name: Deploy OAuth Worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: oauth-worker
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: web/worker
+          command: deploy
+      - name: Verify Worker
+        env:
+          WORKER_URL: ${{ vars.GH_WORKER_URL }}
+        run: |
+          [ -n "$WORKER_URL" ] || { echo "::error::GH_WORKER_URL is unset"; exit 1; }
+          curl --fail --silent --show-error --location --max-time 20 \
+            "${WORKER_URL%/}/health" |
+            grep -q '"status":"ok"'

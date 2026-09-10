@@ -79,6 +79,21 @@ test("deploy.yml is valid YAML with what-if gate then real deploy", () => {
   assert.ok(deployRun.includes("az deployment group create"), "deploy must create resources");
 });
 
+test("deploy.yml pins every third-party action to an immutable commit SHA", () => {
+  const { intent, plan, bicep } = build("contoso-marketing");
+  const workflow = buildScaffold(intent, plan, bicep).find(
+    (file) => file.path === ".github/workflows/deploy.yml",
+  )!.content;
+  const uses = [...workflow.matchAll(/uses:\s*([^\s#]+)(?:\s+#\s*(.+))?/g)];
+  assert.ok(uses.length > 0);
+  for (const match of uses) {
+    assert.match(match[1]!, /^[^@]+@[0-9a-f]{40}$/, `${match[1]} must use an immutable SHA`);
+    assert.match(match[2] ?? "", /^v\d+$/, `${match[1]} must preserve a readable version comment`);
+  }
+  assert.ok(workflow.includes("actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4"));
+  assert.ok(workflow.includes("azure/login@8216e11d8cd9b42fe925c852af8e76311ff067ac # v2"));
+});
+
 test("Postgres plans wire a PG_ADMIN_PASSWORD secret; non-Postgres plans do not", () => {
   const pg = build("contoso-marketing");
   const pgWf = buildScaffold(pg.intent, pg.plan, pg.bicep).find(
@@ -108,7 +123,9 @@ test("Postgres pipeline passes the secret via a params file, never inline on arg
     (f) => f.path === ".github/workflows/deploy.yml",
   )!.content;
   // The secret is written to a params file and referenced with @-file...
-  assert.ok(wf.includes("--parameters @azx.params.json"), "must reference a params file");
+  assert.ok(wf.includes('--parameters "@$PARAMS_FILE"'), "must reference a unique params file");
+  assert.ok(wf.includes('mktemp "$RUNNER_TEMP/azx-params.'), "must create a unique runner-temp file");
+  assert.ok(wf.includes("if: ${{ always() }}"), "must clean up even after deployment failure");
   assert.ok(wf.includes("jq -n --arg p"), "must build the params file from the secret via jq");
   // ...guarded by a fail-fast check so an unset secret errors before burning an approval...
   assert.ok(
@@ -185,7 +202,7 @@ test("scaffold flags a partial-deploy ledger instead of claiming a clean no-op",
   );
 });
 
-test("shipSteps: no repo → git-only; --create-repo adds gh create; --deploy adds trigger", () => {
+test("shipSteps: no repo → git-only; --create-repo adds gh create; --deploy is refused until OIDC setup", () => {
   const { intent, plan, bicep } = build("django-notes");
 
   const local = shipSteps(intent, plan, bicep);
@@ -200,10 +217,10 @@ test("shipSteps: no repo → git-only; --create-repo adds gh create; --deploy ad
   // No deploy trigger unless asked.
   assert.ok(!created.steps.some((s) => s.args.includes("workflow")));
 
-  const shipped = shipSteps(intent, plan, bicep, { repo: "acme/notes", deploy: true });
-  const trigger = shipped.steps.find((s) => s.cmd === "gh" && s.args[1] === "run");
-  assert.ok(trigger, "expected a `gh workflow run` step when --deploy is set");
-  assert.deepEqual(trigger!.args, ["workflow", "run", "deploy.yml", "--repo", "acme/notes"]);
+  assert.throws(
+    () => shipSteps(intent, plan, bicep, { repo: "acme/notes", deploy: true }),
+    /OIDC variables do not exist yet/,
+  );
 
   const publicRepo = shipSteps(intent, plan, bicep, { repo: "acme/notes", visibility: "public" });
   assert.ok(
@@ -310,7 +327,7 @@ test("runShip refuses to publish into a non-empty directory", () => {
   try {
     writeFileSync(join(dir, "stray-secret.txt"), "do not publish me");
     assert.throws(
-      () => runShip(intent, plan, bicep, { outDir: dir, repo: "acme/notes" }, () => {}),
+      () => runShip(intent, { ...plan, confirmations: [] }, bicep, { outDir: dir, repo: "acme/notes" }, () => {}),
       /already exists and is not empty/,
     );
   } finally {
@@ -343,7 +360,7 @@ test("runShip writes the scaffold to disk and runs each step in that dir", () =>
       ran.push({ step, cwd });
     };
 
-    const result = runShip(intent, plan, bicep, { outDir: dir, repo: "acme/notes", deploy: true }, fakeRunner);
+    const result = runShip(intent, { ...plan, confirmations: [] }, bicep, { outDir: dir, repo: "acme/notes" }, fakeRunner);
 
     assert.equal(result.executed, true);
     // Every scaffold file landed on disk.

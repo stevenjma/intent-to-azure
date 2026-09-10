@@ -29,7 +29,11 @@ export interface MapContext {
 
 /** Sanitize a model id into an Azure deployment name. */
 function deploymentName(model: string): string {
-  return model.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  const clean = model.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "model";
+  let h = 2166136261;
+  for (let i = 0; i < model.length; i++) h = Math.imul(h ^ model.charCodeAt(i), 16777619);
+  const suffix = (h >>> 0).toString(36).slice(0, 8);
+  return `${clean.slice(0, 63 - suffix.length).replace(/-+$/g, "")}-${suffix}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,7 +136,7 @@ export function buildChatModel(need: Need, ctx: MapContext, approvedModels?: str
     region: ctx.region,
     capability: "chat-model",
     estimatedMonthlyUsd: 0,
-    notes: ["Token usage is billed per-1K tokens; the fixed cost is $0. Confirm model availability in the chosen region."],
+    notes: ["Usage is billed per token. The $0 modeled fixed cost is not a spend cap; actual consumption is unbounded."],
     properties: { kind: "OpenAI" },
   };
 

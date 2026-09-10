@@ -11,6 +11,7 @@ on:
       - "web/**"
       - "scripts/build-web.mjs"
       - "package.json"
+      - "package-lock.json"
       - "tsconfig.json"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
@@ -28,9 +29,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: "npm"
@@ -49,29 +50,34 @@ jobs:
           GH_WORKER_URL: ${{ vars.GH_WORKER_URL }}
           GH_SCOPES: ${{ vars.GH_SCOPES }}
         run: |
-          # All identifiers are PUBLIC (no secrets). Set them under
-          # Settings → Secrets and variables → Actions → Variables.
-          # GH_SCOPES is optional; the canonical default below is the single
-          # source of truth for OAuth scopes (kept in sync by
-          # test/oauth-scopes-consistent.test.ts).
-          if [ -z "$AZURE_CLIENT_ID" ]; then
-            echo "AZURE_CLIENT_ID variable unset — publishing placeholder config (setup banner)."
-            cp web/config.example.js web/config.js
-          else
-            cat > web/config.js <<EOF
-          window.AZX_CONFIG = {
-            azureClientId: "${AZURE_CLIENT_ID}",
-            azureTenant: "${AZURE_TENANT:-common}",
-            githubClientId: "${GH_OAUTH_CLIENT_ID}",
-            githubWorkerUrl: "${GH_WORKER_URL}",
-            githubScopes: "${GH_SCOPES:-repo workflow read:user}",
+          node --input-type=module <<'NODE'
+          import { writeFileSync } from "node:fs";
+
+          const required = ["AZURE_CLIENT_ID", "GH_OAUTH_CLIENT_ID", "GH_WORKER_URL"];
+          const missing = required.filter((name) => !process.env[name]?.trim());
+          if (missing.length) {
+            throw new Error(`Refusing production deploy: missing repository variable(s): ${missing.join(", ")}`);
+          }
+
+          const azureClientId = process.env.AZURE_CLIENT_ID.trim();
+          if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(azureClientId)) {
+            throw new Error("AZURE_CLIENT_ID must be a GUID.");
+          }
+          const worker = new URL(process.env.GH_WORKER_URL.trim());
+          if (worker.protocol !== "https:") throw new Error("GH_WORKER_URL must use HTTPS.");
+
+          const config = {
+            azureClientId,
+            azureTenant: process.env.AZURE_TENANT?.trim() || "common",
+            githubClientId: process.env.GH_OAUTH_CLIENT_ID.trim(),
+            githubWorkerUrl: worker.origin,
+            githubScopes: process.env.GH_SCOPES?.trim() || "repo workflow read:user",
           };
-          EOF
-            echo "Generated web/config.js from repo Variables."
-          fi
+          writeFileSync("web/config.js", `window.AZX_CONFIG = ${JSON.stringify(config, null, 2)};\n`);
+          NODE
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: web
 
@@ -83,4 +89,18 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+
+      - name: Verify deployed site
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if body="$(curl --fail --silent --show-error --location --max-time 20 "$PAGE_URL")" &&
+               grep -q "App Intent" <<<"$body"; then
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::Pages deployment did not pass its smoke test."
+          exit 1

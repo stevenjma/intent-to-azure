@@ -263,6 +263,7 @@ export interface AzureResource {
 
 /** Budget summary attached to the plan. */
 export interface PlanBudget {
+  /** Advisory modeled total; not a hard cap or guarantee. */
   estimatedMonthlyUsd: number;
   currency: string;
   monthlyCapUsd?: number;

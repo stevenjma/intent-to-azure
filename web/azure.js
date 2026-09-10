@@ -15,6 +15,7 @@
  */
 
 import { PublicClientApplication } from "https://esm.sh/@azure/msal-browser@3.28.1";
+import { pollArmOperation } from "./arm-poll.js";
 
 const ARM = "https://management.azure.com";
 const ARM_SCOPE = "https://management.azure.com/user_impersonation";
@@ -260,8 +261,22 @@ export async function azureSignIn(config) {
   return completeAzureSignIn(config, res);
 }
 
-export function azureSignOut() {
+export async function azureSignOut() {
+  const app = msal;
+  const signedOut = account;
   account = null;
+  if (!app || !signedOut) return;
+  app.setActiveAccount(null);
+  try {
+    await app.logoutPopup({
+      account: signedOut,
+      postLogoutRedirectUri: window.location.origin + window.location.pathname,
+    });
+  } finally {
+    // Ensure the local MSAL cache is cleared even when the identity-provider
+    // logout popup is blocked or closed.
+    await app.getTokenCache().removeAccount(signedOut).catch(() => {});
+  }
 }
 
 /** Acquire an ARM access token, silently when possible. */
@@ -337,26 +352,32 @@ export async function ensureResourceGroup(subscriptionId, resourceGroup, region)
   );
 }
 
-/** Poll an async ARM operation (202 + Location / Azure-AsyncOperation) to completion. */
-async function pollAsync(res, { onLog } = {}) {
-  let current = res;
-  for (let i = 0; i < 120; i++) {
-    const asyncUrl =
-      current.headers.get("azure-asyncoperation") || current.headers.get("location");
-    if (current.status !== 202 && current.status !== 201) {
-      return current.status === 204 ? null : current.json();
-    }
-    if (!asyncUrl) return current.status === 204 ? null : current.json().catch(() => null);
-    const retryAfter = Number(current.headers.get("retry-after") || "5");
-    onLog?.(`  … in progress (waiting ${retryAfter}s)`);
-    await sleep(retryAfter * 1000);
-    current = await arm(asyncUrl);
-    if (!current.ok && current.status >= 400) {
-      const detail = await current.text().catch(() => "");
-      throw new Error(`ARM async op failed → ${current.status}: ${detail}`);
-    }
+/** Check whether a resource group exists without creating it. */
+export async function resourceGroupExists(subscriptionId, resourceGroup) {
+  const res = await arm(
+    `/subscriptions/${subscriptionId}/resourcegroups/${encodeURIComponent(resourceGroup)}`,
+    { apiVersion: RG_API },
+  );
+  if (res.status === 404) return false;
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`ARM resource-group check → ${res.status}: ${detail}`);
   }
-  throw new Error("ARM async operation timed out.");
+  return true;
+}
+
+/** Poll an ARM operation until an explicit terminal state, with a bounded timeout. */
+export async function pollAsync(
+  res,
+  { onLog, pollUrl, timeoutMs = 10 * 60 * 1000, sleepFn = sleep, now = Date.now } = {},
+) {
+  return pollArmOperation(res, (url) => arm(url), {
+    onLog,
+    pollUrl,
+    timeoutMs,
+    sleep: sleepFn,
+    now,
+  });
 }
 
 /**
@@ -375,7 +396,7 @@ export async function whatIf(subscriptionId, resourceGroup, deploymentName, temp
     const detail = await res.text().catch(() => "");
     throw new Error(`ARM what-if → ${res.status}: ${detail}`);
   }
-  return pollAsync(res, opts);
+  return pollAsync(res, { ...opts, pollUrl: path });
 }
 
 /**
@@ -394,7 +415,7 @@ export async function deploy(subscriptionId, resourceGroup, deploymentName, temp
     const detail = await res.text().catch(() => "");
     throw new Error(`ARM deploy → ${res.status}: ${detail}`);
   }
-  await pollAsync(res, opts);
+  await pollAsync(res, { ...opts, pollUrl: path });
   // Fetch the final deployment record for outputs / provisioning state.
   const final = await armJson(path, { apiVersion: DEPLOY_API });
   return final;

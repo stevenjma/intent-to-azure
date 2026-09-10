@@ -65,7 +65,7 @@ export function plan(intent: AppIntent, opts: PlanOptions = {}): AzurePlan {
 
   const guardrailNotes = buildGuardrailNotes(guardrails, needs, region, pinnedByGuardrail);
   const planBudget = rollUpBudget(resources, guardrails, budget);
-  const confirmations = buildPlanConfirmations(intent, needs, region, pinnedByGuardrail);
+  const confirmations = buildPlanConfirmations(intent, needs, region, pinnedByGuardrail, guardrails);
   const warnings = buildWarnings(needs, guardrails);
   const summary = buildSummary(intent, resources, region, planBudget, budget);
 
@@ -127,7 +127,9 @@ function buildResources(needs: Need[], ctx: MapContext, guardrails?: Guardrails)
         resources.push(...buildRelational(need, ctx));
         break;
       case "chat-model":
-        resources.push(...buildChatModel(need, ctx, guardrails?.approvedModels));
+        if (isAzureOpenAIProvider(need) && selectedModels(need, guardrails).length > 0) {
+          resources.push(...buildChatModel(need, ctx, guardrails?.approvedModels));
+        }
         break;
       case "embeddings":
         // Served by pgvector? Then no Azure resource — Postgres handles it.
@@ -173,20 +175,40 @@ function wireComputeDependencies(resources: AzureResource[]): void {
 /** Replace the `${appName}` token in resource names (storage has stricter rules). */
 function materializeNames(resources: AzureResource[], appName: string): void {
   const slug = appName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "app";
-  const storageToken = ("st" + slug.replace(/-/g, "")).slice(0, 24);
+  const hash = stableHash(appName);
   for (const r of resources) {
     if (!r.name.includes("${appName}")) continue;
-    if (r.type === "Microsoft.Storage/storageAccounts") {
-      r.name = storageToken;
-    } else {
-      r.name = r.name.replace(/\$\{appName\}/g, slug);
-      // Container Apps and Jobs names must be <=32 chars (lowercase alnum/hyphen,
-      // start letter, end alnum). Clamp deterministically with a stable hash suffix.
-      if (r.type === "Microsoft.App/containerApps" || r.type === "Microsoft.App/jobs") {
-        r.name = clampName(r.name, 32);
-      }
+    const candidate = r.name.replace(/\$\{appName\}/g, slug);
+    switch (r.type) {
+      case "Microsoft.Storage/storageAccounts":
+        r.name = withGlobalSuffix(("st" + slug).replace(/[^a-z0-9]/g, ""), hash, 24, "");
+        break;
+      case "Microsoft.CognitiveServices/accounts":
+        r.name = withGlobalSuffix(candidate, hash, 64, "-");
+        break;
+      case "Microsoft.Search/searchServices":
+        r.name = withGlobalSuffix(candidate, hash, 60, "-");
+        break;
+      case "Microsoft.DBforPostgreSQL/flexibleServers":
+        r.name = withGlobalSuffix(candidate, hash, 63, "-");
+        break;
+      case "Microsoft.App/containerApps":
+      case "Microsoft.App/jobs":
+        r.name = clampName(candidate, 32);
+        break;
+      case "Microsoft.App/managedEnvironments":
+        r.name = clampName(candidate, 60);
+        break;
+      default:
+        r.name = candidate;
     }
   }
+}
+
+function withGlobalSuffix(name: string, hash: string, limit: number, separator: string): string {
+  const suffix = separator + hash;
+  const head = name.slice(0, limit - suffix.length).replace(/-+$/g, "") || "app";
+  return (head + suffix).slice(0, limit).replace(/-+$/g, "");
 }
 
 /** Deterministically shorten a name to `limit` chars, appending a stable hash suffix. */
@@ -205,7 +227,18 @@ function fnv1a(s: string): number {
     h ^= s.charCodeAt(i);
     h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
   }
+
   return h >>> 0;
+}
+
+/** Deterministic 64-bit FNV-1a suffix: materially safer than a short app-name truncation. */
+function stableHash(s: string): string {
+  let h = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(s)) {
+    h ^= BigInt(byte);
+    h = BigInt.asUintN(64, h * 0x100000001b3n);
+  }
+  return h.toString(36).padStart(13, "0").slice(-10);
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +301,21 @@ function rollUpBudget(
   const onExceed = guardrails?.budget?.onExceed ?? "warn";
   const warnings: string[] = [];
   let blocked = false;
+  const unbounded = resources.some((r) =>
+    r.type === "Microsoft.CognitiveServices/accounts" ||
+    r.type === "Microsoft.CognitiveServices/accounts/deployments" ||
+    r.type === "Microsoft.App/containerApps" ||
+    r.type === "Microsoft.App/jobs",
+  );
+
+  warnings.push("Cost estimates are advisory; consumption and usage charges are not a hard spend limit.");
+  if (unbounded) warnings.push("The plan contains usage-based services whose maximum monthly cost is unknown.");
+  if (cap !== undefined && onExceed === "block" && unbounded) {
+    blocked = true;
+    warnings.push(
+      `Blocked by guardrail: azx cannot prove the $${cap}/mo cap while usage-based consumption is unbounded.`,
+    );
+  }
 
   if (prefersEconomy(budget)) {
     warnings.push(
@@ -323,6 +371,7 @@ function buildPlanConfirmations(
   needs: Need[],
   region: string,
   pinned: boolean,
+  guardrails?: Guardrails,
 ): Confirmation[] {
   const byId = new Map<string, Confirmation>();
   for (const c of intent.confirmations) byId.set(c.id, c);
@@ -375,6 +424,29 @@ function buildPlanConfirmations(
     });
   }
 
+  for (const need of needs) {
+    if (need.capability !== "chat-model") continue;
+    const provider = typeof need.options?.provider === "string" ? need.options.provider.toLowerCase() : undefined;
+    if (!isAzureOpenAIProvider(need)) {
+      byId.set("capability:chat-model:provider", {
+        id: "capability:chat-model:provider",
+        capability: "chat-model",
+        question: `Provider '${provider ?? "unknown"}' cannot be provisioned as Azure OpenAI. Choose a supported Azure target.`,
+        confidence: "low",
+        why: "azx will not translate Anthropic/Claude or an unknown provider into an Azure OpenAI account.",
+        options: ["Use Azure OpenAI", "Provide a provider-specific escape hatch"],
+      });
+    } else if (selectedModels(need, guardrails).length === 0) {
+      byId.set("capability:chat-model:model", {
+        id: "capability:chat-model:model",
+        capability: "chat-model",
+        question: "No deployable model was resolved. Choose an Azure OpenAI model deployment.",
+        confidence: "low",
+        why: "Creating an empty Azure OpenAI account would not satisfy the application.",
+      });
+    }
+  }
+
   return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
@@ -388,7 +460,7 @@ function buildWarnings(needs: Need[], guardrails?: Guardrails): string[] {
       const models = Array.isArray(need.options?.models) ? (need.options!.models as string[]) : [];
       if (models.length > 0 && models.every((m) => !allow.has(m.toLowerCase()))) {
         warnings.push(
-          "Every detected chat model was filtered out by the approved-models guardrail; the Azure OpenAI account has no deployments.",
+          "Every detected chat model was filtered out by the approved-models guardrail; no Azure OpenAI resources will be created.",
         );
       }
     }
@@ -414,15 +486,29 @@ function buildSummary(
   );
   for (const r of resources) {
     const sku = r.sku ? ` [${r.sku}]` : "";
-    const cost = r.estimatedMonthlyUsd ? ` ~$${r.estimatedMonthlyUsd}/mo` : "";
+    const cost = r.estimatedMonthlyUsd ? ` advisory ~$${r.estimatedMonthlyUsd}/mo` : " usage-based/estimate unavailable";
     lines.push(`  • ${r.service}${sku} as "${r.name}"${cost}`);
   }
   lines.push(
-    `Estimated total: ~$${planBudget.estimatedMonthlyUsd}/mo ${planBudget.currency}` +
+    `Advisory modeled total: ~$${planBudget.estimatedMonthlyUsd}/mo ${planBudget.currency}` +
       (planBudget.monthlyCapUsd !== undefined ? ` (cap $${planBudget.monthlyCapUsd}/mo)` : "") +
       ".",
   );
   const budgetNote = describeBudget(budget);
   if (budgetNote) lines.push(budgetNote);
   return lines;
+}
+
+function isAzureOpenAIProvider(need: Need): boolean {
+  const provider = typeof need.options?.provider === "string" ? need.options.provider.toLowerCase() : undefined;
+  return provider === "openai" || provider === "azure-openai";
+}
+
+function selectedModels(need: Need, guardrails?: Guardrails): string[] {
+  const models = Array.isArray(need.options?.models)
+    ? need.options.models.filter((m): m is string => typeof m === "string" && m.length > 0)
+    : [];
+  if (!guardrails?.approvedModels?.length) return models;
+  const allow = new Set(guardrails.approvedModels.map((m) => m.toLowerCase()));
+  return models.filter((m) => allow.has(m.toLowerCase()));
 }

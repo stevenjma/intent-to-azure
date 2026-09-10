@@ -25,6 +25,7 @@ import {
   azureSignedIn,
   restoreAzureSession,
   listSubscriptions,
+  resourceGroupExists,
   ensureResourceGroup,
   whatIf,
   deploy,
@@ -37,6 +38,11 @@ const $ = (id) => document.getElementById(id);
 let current = null;
 /** True once a what-if has succeeded for the current deploy inputs (gates apply). */
 let whatIfOk = false;
+let deployInputRevision = 0;
+let approvedInputRevision = -1;
+let analysisSequence = 0;
+let analysisController = null;
+let confirmationApprovalSequence = -1;
 
 /** The linear stages. `codify`/`deploy` are the two "Act" spokes off `review`. */
 const STAGES = ["source", "review", "codify", "deploy"];
@@ -51,7 +57,7 @@ const dirty = { rg: false, region: false, ship: false };
 // Setup / boot
 // --------------------------------------------------------------------------
 
-function boot() {
+export function boot(oauthResult = null) {
   // Name every required identifier so the setup banner can say exactly what's
   // missing (self-host forkers hit partial-config states otherwise — DR-010).
   const REQUIRED = [
@@ -69,8 +75,8 @@ function boot() {
     banner.appendChild(list);
   }
 
-  $("btn-azure").addEventListener("click", onAzureSignIn);
-  $("btn-github").addEventListener("click", onGithubSignIn);
+  $("btn-azure").addEventListener("click", onAzureAuth);
+  $("btn-github").addEventListener("click", onGithubAuth);
   $("repo-form").addEventListener("submit", onAnalyze);
   $("repo-input").addEventListener("input", onRepoInput);
   $("btn-whatif").addEventListener("click", onWhatIf);
@@ -85,15 +91,22 @@ function boot() {
   }
 
   // Deploy inputs: changing them invalidates a prior what-if and marks dirty.
-  for (const id of ["sub-select", "rg-input", "region-input"]) {
+  for (const id of ["sub-select", "rg-input", "region-input", "pg-password"]) {
     $(id).addEventListener("input", () => {
       if (id === "rg-input") dirty.rg = true;
       if (id === "region-input") dirty.region = true;
+      deployInputRevision++;
       setWhatIfOk(false);
     });
   }
   $("ship-repo-input").addEventListener("input", () => {
     dirty.ship = true;
+  });
+  $("confirm-assumptions").addEventListener("change", (event) => {
+    confirmationApprovalSequence = event.target.checked ? analysisSequence : -1;
+    deployInputRevision++;
+    setWhatIfOk(false);
+    updateAvailability();
   });
 
   // Deep-link support: #review / #codify / #deploy on boot (guarded).
@@ -102,7 +115,7 @@ function boot() {
   render();
 
   // Restore any prior sign-ins (redirect return or a saved tab session).
-  restoreSessions();
+  restoreSessions(oauthResult);
 }
 
 // --------------------------------------------------------------------------
@@ -160,7 +173,24 @@ function setDot(btnId, state) {
 // Auth
 // --------------------------------------------------------------------------
 
-async function onAzureSignIn() {
+async function onAzureAuth() {
+  if (azureSignedIn()) {
+    try {
+      await azureSignOut();
+    } catch (err) {
+      console.warn("Azure provider sign-out did not complete:", err.message);
+    } finally {
+      setDot("btn-azure", "out");
+      $("btn-azure").lastChild.textContent = " Sign in with Azure";
+      $("sub-select").replaceChildren();
+      $("sub-select").disabled = true;
+      deployInputRevision++;
+      setWhatIfOk(false);
+      clearAuthNotice();
+      render();
+    }
+    return;
+  }
   setDot("btn-azure", "pending");
   try {
     const acct = await azureSignIn(cfg);
@@ -187,9 +217,9 @@ function applyAzureSignedIn(acct) {
  * account (Azure). Sets each button straight to its final state — no "pending"
  * flicker on loads where there's nothing to restore.
  */
-async function restoreSessions() {
+async function restoreSessions(oauthResult) {
   try {
-    let ghUser = await handleGithubRedirect();
+    let ghUser = await handleGithubRedirect(oauthResult);
     if (!ghUser) ghUser = await restoreGithubSession();
     if (ghUser) {
       setDot("btn-github", "in");
@@ -279,7 +309,17 @@ function renderAzureError(err) {
   );
 }
 
-async function onGithubSignIn() {
+async function onGithubAuth() {
+  if (githubSignedIn()) {
+    githubSignOut();
+    setDot("btn-github", "out");
+    $("btn-github").lastChild.textContent = " Sign in with GitHub";
+    repoChoices.clear();
+    renderRepoOptions();
+    $("repo-input").placeholder = "owner/repo  (sign in to search your repos)";
+    render();
+    return;
+  }
   setDot("btn-github", "pending");
   try {
     const user = await githubSignIn(cfg);
@@ -360,15 +400,33 @@ async function onAnalyze(ev) {
   const ref = $("ref-input").value.trim();
   if (!ownerRepo) return;
 
+  analysisController?.abort();
+  analysisController = new AbortController();
+  const sequence = ++analysisSequence;
+  current = null;
+  confirmationApprovalSequence = -1;
+  deployInputRevision++;
+  setWhatIfOk(false);
+  if (currentStage !== "source") goToStage("source");
+  else render();
   const status = $("repo-status");
   status.className = "status";
   status.textContent = "Fetching repo files…";
   try {
-    const { owner, repo, files, truncated } = await fetchRepoFiles(ownerRepo, ref);
+    const { owner, repo, files, truncated } = await fetchRepoFiles(ownerRepo, ref, {
+      signal: analysisController.signal,
+    });
+    if (sequence !== analysisSequence) return;
     if (files.size === 0) throw new Error("No readable text files found in that repo/branch.");
-    status.textContent = `Scanned ${files.size} files${truncated ? " (truncated)" : ""}. Resolving plan…`;
+    if (truncated) {
+      throw new Error(
+        "Repository scan was incomplete (GitHub truncated the tree or the 400-file safety cap was reached). Deployment is disabled; narrow the repository or branch and analyze again.",
+      );
+    }
+    status.textContent = `Scanned ${files.size} files. Resolving plan…`;
 
     const result = resolveScan(repo, files);
+    if (sequence !== analysisSequence) return;
     current = { ...result, appName: repo, owner, hosting: detectCurrentHosting(files) };
     renderReview(current);
     resetActionState(owner, repo, result.plan);
@@ -377,6 +435,7 @@ async function onAnalyze(ev) {
     status.textContent = `Done — ${result.plan.resources.length} Azure resource(s) planned for “${repo}”.`;
     goToStage("review");
   } catch (err) {
+    if (sequence !== analysisSequence || err?.name === "AbortError") return;
     status.className = "status err";
     renderRepoError(status, err);
   }
@@ -401,6 +460,8 @@ function resetActionState(owner, repo, plan) {
   // silently under the signed-in personal account. Users can edit it.
   $("ship-repo-input").value = owner ? `${owner}/${slug(repo)}-infra` : `${slug(repo)}-infra`;
   whatIfOk = false;
+  approvedInputRevision = -1;
+  deployInputRevision++;
 }
 
 /**
@@ -466,9 +527,34 @@ function renderReview(r) {
   renderMigrationNote(r.hosting);
   renderWhy(r.intent);
   renderWhat(r.plan);
+  renderConfirmationGate(r.plan);
   renderScaffold(r.scaffold);
   $("land-count").textContent = String(r.scaffold.length);
   $("bicep-view").textContent = r.bicep;
+}
+
+function renderConfirmationGate(plan) {
+  const gate = $("confirmation-gate");
+  const list = $("confirmation-list");
+  const checkbox = $("confirm-assumptions");
+  const confirmations = plan.confirmations?.filter((confirmation) => confirmation.confidence !== "high") || [];
+  const requiredDecisions = confirmations.filter((confirmation) => !confirmation.assumption);
+  list.textContent = "";
+  checkbox.checked = confirmationApprovalSequence === analysisSequence;
+  checkbox.disabled = requiredDecisions.length > 0;
+  gate.classList.toggle("hidden", confirmations.length === 0);
+  for (const confirmation of confirmations) {
+    const item = document.createElement("li");
+    const details = [confirmation.why];
+    if (confirmation.options?.length) details.push(`Options: ${confirmation.options.join(" / ")}`);
+    details.push(
+      confirmation.assumption
+        ? `Assumption: ${confirmation.assumption}`
+        : "Decision required: update the source configuration or guardrails, then analyze again.",
+    );
+    item.textContent = `${confirmation.question} (${details.join(" ")})`;
+    list.appendChild(item);
+  }
 }
 
 function renderMigrationNote(hosting) {
@@ -574,12 +660,16 @@ async function populateSubscriptions() {
  * that navigate stay enabled; only terminal actions gate on auth/inputs.
  */
 function updateAvailability() {
+  const unresolved = unresolvedConfirmations();
+  const confirmationReason = unresolved.length
+    ? `Resolve ${unresolved.length} confirmation${unresolved.length === 1 ? "" : "s"} before acting.`
+    : "";
   // Codify path.
   const codifyReason = !current
     ? "Analyze a repo first."
     : !githubSignedIn()
       ? "Sign in with GitHub (top bar) to enable."
-      : "";
+      : confirmationReason;
   $("btn-ship").disabled = Boolean(codifyReason);
   setReason("codify-reason", codifyReason, "review");
   setReason("codify-reason-act", codifyReason, "act");
@@ -594,16 +684,36 @@ function updateAvailability() {
   else if (noSubs) deployReason = "Signed in, but no Azure subscriptions were found on this account.";
   else if (!subVal) deployReason = "Pick a subscription.";
   else if (budgetBlocked) deployReason = "A guardrail blocks this plan's budget — deploy is disabled.";
+  else if (confirmationReason) deployReason = confirmationReason;
   setReason("deploy-reason", deployReason, "review");
   setReason("deploy-reason-act", deployReason, "act");
 
-  const canWhatIf = Boolean(current) && azureSignedIn() && Boolean(subVal) && !budgetBlocked;
+  const canWhatIf =
+    Boolean(current) && azureSignedIn() && Boolean(subVal) && !budgetBlocked && unresolved.length === 0;
   $("btn-whatif").disabled = !canWhatIf;
   $("btn-apply").disabled = !canWhatIf || !whatIfOk;
 
   // Show the PG password field only when the plan provisions Postgres.
   const pgField = $("pg-field");
   if (pgField) pgField.classList.toggle("hidden", !(current && planNeedsPgPassword(current.plan)));
+}
+
+function unresolvedConfirmations() {
+  const confirmations =
+    current?.plan?.confirmations?.filter((confirmation) => confirmation.confidence !== "high") || [];
+  return confirmations.filter(
+    (confirmation) => !confirmation.assumption || confirmationApprovalSequence !== analysisSequence,
+  );
+}
+
+function requireResolvedConfirmations() {
+  const unresolved = unresolvedConfirmations();
+  if (unresolved.length) {
+    throw new Error(
+      `Refusing to act with ${unresolved.length} unresolved confirmation(s): ` +
+        unresolved.map((confirmation) => confirmation.id).join(", "),
+    );
+  }
 }
 
 /**
@@ -630,6 +740,7 @@ function setReason(id, msg, scope) {
 
 function setWhatIfOk(ok) {
   whatIfOk = ok;
+  approvedInputRevision = ok ? deployInputRevision : -1;
   updateAvailability();
 }
 
@@ -662,14 +773,33 @@ async function onWhatIf() {
   const log = $("deploy-log");
   log.textContent = "";
   try {
+    requireResolvedConfirmations();
+    const inputRevision = deployInputRevision;
     const { subscriptionId, resourceGroup, region } = deployInputs();
     const params = deployParameters();
     const template = generateArmTemplate(current.plan);
 
     const write = (m) => (log.textContent += m + "\n");
-    write(`▶ Ensuring resource group ${resourceGroup} (${region})…`);
-    await ensureResourceGroup(subscriptionId, resourceGroup, region);
-    write("▶ Running ARM what-if (no changes made)…");
+    const exists = await resourceGroupExists(subscriptionId, resourceGroup);
+    if (inputRevision !== deployInputRevision) {
+      throw new Error("Deployment inputs changed while preparing what-if. Run what-if again.");
+    }
+    if (!exists) {
+      const approved = window.confirm(
+        `ARM what-if requires resource group “${resourceGroup}” to exist.\n\n` +
+          `Create it in ${region} now? This is a real Azure change; no app resources are deployed yet.`,
+      );
+      if (!approved) {
+        write("Preview canceled; Azure was not changed.");
+        return;
+      }
+      write(`▶ Creating prerequisite resource group ${resourceGroup} (${region}) — real Azure change…`);
+      await ensureResourceGroup(subscriptionId, resourceGroup, region);
+      if (inputRevision !== deployInputRevision) {
+        throw new Error("Deployment inputs changed. The prerequisite group was created, but what-if was not run.");
+      }
+    }
+    write("▶ Running ARM what-if (no application resources changed)…");
     const result = await whatIf(
       subscriptionId,
       resourceGroup,
@@ -684,6 +814,9 @@ async function onWhatIf() {
       write(`  ${c.changeType || "?"}  ${c.resourceId || c.after?.id || ""}`);
     }
     write("\nReview the predicted changes above, then click Deploy to apply.");
+    if (inputRevision !== deployInputRevision) {
+      throw new Error("Deployment inputs changed while what-if was running. Run what-if again.");
+    }
     setWhatIfOk(true);
   } catch (err) {
     $("deploy-log").textContent += `\n✖ ${err.message}\n`;
@@ -692,11 +825,12 @@ async function onWhatIf() {
 }
 
 async function onApply() {
-  if (!whatIfOk) return;
+  if (!whatIfOk || approvedInputRevision !== deployInputRevision) return;
   const log = $("deploy-log");
   const write = (m) => (log.textContent += m + "\n");
   let inputs;
   try {
+    requireResolvedConfirmations();
     inputs = deployInputs();
   } catch (err) {
     write(`\n✖ ${err.message}`);
@@ -746,6 +880,7 @@ async function onShip() {
   const write = (m) => (log.textContent += m + "\n");
   log.textContent = "";
   try {
+    requireResolvedConfirmations();
     const name = $("ship-repo-input").value.trim();
     if (!name) throw new Error("Enter a name for the new repo.");
     const isPrivate = $("ship-private").checked;
@@ -804,5 +939,3 @@ function slug(s) {
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
-
-boot();

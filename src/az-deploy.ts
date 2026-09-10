@@ -18,8 +18,9 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { writeFileSync, rmSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { writeFileSync, rmSync, readFileSync, mkdtempSync, chmodSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 
 import type { AzurePlan, DeployLedger } from "./types.js";
@@ -165,10 +166,17 @@ export function runLocalDeploy(
 ): LocalDeployResult {
   const steps: string[] = [];
   const needsPg = planNeedsPgPassword(plan);
+  const unresolved = plan.confirmations.filter((c) => c.confidence !== "high");
+  if (unresolved.length) {
+    throw new Error(
+      `refusing to deploy with ${unresolved.length} unresolved confirmation(s): ${unresolved.map((c) => c.id).join(", ")}. ` +
+        "Resolve them in the App Intent/guardrails and regenerate the plan.",
+    );
+  }
 
   if (needsPg && !opts.pgPassword) {
     throw new Error(
-      "this plan provisions PostgreSQL — pass --pg-password <value> (it is a @secure() param with no default).",
+      "this plan provisions PostgreSQL — set AZX_PG_PASSWORD in the environment (it is never passed in child argv).",
     );
   }
 
@@ -176,8 +184,11 @@ export function runLocalDeploy(
   // (0600) params file next to the bicep and reference it with `--parameters @`.
   // Cleaned up in the `finally` below so the secret never lingers on disk.
   let paramsFile: string | undefined;
+  let paramsDir: string | undefined;
   if (needsPg && opts.pgPassword) {
-    paramsFile = join(dirname(opts.bicepPath), "azx.params.json");
+    paramsDir = mkdtempSync(join(tmpdir(), "azx-params-"));
+    chmodSync(paramsDir, 0o700);
+    paramsFile = join(paramsDir, "params.json");
     writeFileSync(
       paramsFile,
       JSON.stringify({ postgresAdminPassword: { value: opts.pgPassword } }) + "\n",
@@ -237,10 +248,22 @@ export function runLocalDeploy(
       );
     }
 
-    // 3. Ensure the resource group.
-    const rg = runner(["group", "create", "-n", opts.resourceGroup, "-l", opts.region, "-o", "none"]);
-    if (rg.status !== 0) throw new Error(`az group create failed: ${rg.stderr.trim()}`);
-    steps.push(`ensured resource group ${opts.resourceGroup} in ${opts.region}`);
+    // A preview must not mutate the subscription. Group-scope what-if requires an
+    // existing RG, so fail with guidance instead of silently creating one.
+    if (!opts.apply) {
+      const exists = runner(["group", "exists", "-n", opts.resourceGroup, "-o", "tsv"]);
+      if (exists.status !== 0 || exists.stdout.trim().toLowerCase() !== "true") {
+        throw new Error(
+          `safe preview requires existing resource group ${opts.resourceGroup}; none was found. ` +
+            "Create it explicitly, or re-run with --yes to approve resource-group creation and deployment.",
+        );
+      }
+      steps.push(`verified existing resource group ${opts.resourceGroup} (no cloud state created)`);
+    } else {
+      const rg = runner(["group", "create", "-n", opts.resourceGroup, "-l", opts.region, "-o", "none"]);
+      if (rg.status !== 0) throw new Error(`az group create failed: ${rg.stderr.trim()}`);
+      steps.push(`ensured resource group ${opts.resourceGroup} in ${opts.region}`);
+    }
 
     // 4. What-if gate — always previewed, never optional.
     const params = paramArgs(opts, paramsFile);
@@ -302,12 +325,8 @@ export function runLocalDeploy(
 
     return { applied: true, blocked: false, steps, whatIf: whatIf.stdout, ledger: ledgerBase };
   } finally {
-    if (paramsFile) {
-      try {
-        rmSync(paramsFile, { force: true });
-      } catch {
-        /* best-effort cleanup */
-      }
+    if (paramsDir) {
+      rmSync(paramsDir, { recursive: true, force: true });
     }
   }
 }

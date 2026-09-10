@@ -77,7 +77,9 @@ node dist/src/cli.js plan ../my-service
 during the scan:
 
 - `guardrails.yaml` (repo root) — region allow-list, approved models, spend cap, SKU tier.
-  Guardrails **win** over anything detected in the code.
+  Guardrails **win** over anything detected in the code. If a supplied or discovered
+  policy is malformed, has an invalid value, or contains an unknown field, the command
+  fails with the file path rather than silently dropping policy.
 - `.azx/subscription.json` — mock Offer ID + spending limit; a `sponsorship` classification
   defaults to economy SKUs and warns on burn.
 
@@ -244,7 +246,7 @@ COMMANDS
   what-if <path> offline plan diff vs a prior plan (--against) + approval gate
   up <path>      dry-run stub by default; add --local-deploy to REALLY deploy via `az`
   ship <path>    scaffold a deploy repo (Bicep + CI/CD) and, with --create-repo,
-                 create + push it so its pipeline runs the REAL Azure deploy (OIDC)
+                 create + push it; configure OIDC before its pipeline can deploy
   schema         print the open app-intent.schema.json contract
   help           show this help
 
@@ -255,13 +257,13 @@ FLAGS
   --out <file|dir>       write Bicep/schema to a file, or the ship scaffold to a dir
   --scaffold <dir>       plan: also write the full deploy repo tree (Bicep + CI/CD)
   --create-repo <o/n>    ship: create + push a real GitHub repo (owner/name)
-  --deploy               ship: trigger the deploy pipeline after push (real deploy)
+  --deploy               refused for a new repo; configure OIDC, then trigger deploy.yml
   --private/--no-private ship: repo visibility (default: private)
   --local-deploy         up: REALLY deploy to Azure via `az` (needs `az login`)
   --yes                  up --local-deploy: apply for real (else what-if only)
   --resource-group <rg>  up --local-deploy: target RG (default rg-<app>)
   --region <r>           up --local-deploy: target region (default: plan region)
-  --pg-password <p>      up --local-deploy: PostgreSQL admin password (if provisioned)
+  AZX_PG_PASSWORD        environment: PostgreSQL admin password (never placed in child argv)
   --subscription-id <id> up --local-deploy: pin the Azure subscription
   --no-bicep             omit the Bicep block from 'plan' output
   --no-color             disable ANSI color
@@ -271,6 +273,8 @@ FLAGS
 `ship --create-repo` are the only paths that leave the machine: `up --local-deploy`
 calls `az` directly, while `ship` only runs git + `gh` (the real `az deployment group
 create` runs inside the pushed GitHub Actions pipeline via OIDC — azx never calls it).
+Real local deploy and `ship` also fail closed while any medium/low confirmation card
+is unresolved; add explicit guardrails or update the App Intent before provisioning.
 
 ---
 
@@ -287,17 +291,17 @@ always previewed first; the apply only happens with `--yes`:
 
 ```bash
 az login                                   # once
-azx up /path/to/app --local-deploy         # what-if only (a safe preview)
+azx up /path/to/app --local-deploy         # non-mutating what-if; RG must already exist
 azx up /path/to/app --local-deploy --yes   # apply for real
 #   --resource-group <rg>   target RG (default rg-<app>)
 #   --region <r>            target region (default: plan region)
-#   --pg-password <p>       PostgreSQL admin password (if the plan provisions it)
+#   AZX_PG_PASSWORD         PostgreSQL admin password; inject via your environment/secret manager
 #   --subscription-id <id>  pin the subscription
 ```
 
 On a real apply it writes **`.azx/deploy.json`** — the *continuity ledger* (RG,
-region, deployment name, resource names). `az` group-scoped what-if needs the RG to
-exist, so even a preview ensures an (empty) resource group.
+region, deployment name, resource names). Group-scoped what-if needs the RG to
+exist; preview fails with setup guidance rather than creating cloud state.
 
 ### Phase 2 — codify / harden (declarative, durable)
 
@@ -336,8 +340,7 @@ azx ship /path/to/app
 # for real: create + push a private GitHub repo (needs `gh auth login`)
 azx ship /path/to/app --create-repo my-org/my-app
 
-# ...and trigger the pipeline so the deploy runs immediately
-azx ship /path/to/app --create-repo my-org/my-app --deploy
+# Then configure OIDC in the created repo before manually triggering deploy.yml.
 ```
 
 **How the real deploy happens.** The pushed `deploy.yml` authenticates to Azure via
@@ -377,13 +380,13 @@ azx plan /path/to/app                 # signals → intent → Azure plan + Bice
 azx plan /path/to/app --scaffold ./out   # also writes the full deploy repo tree
 ```
 
-**1. Local deploy — get it running now (imperative)**
+**1. Local deploy — provision infrastructure (imperative)**
 
 ```bash
 az login
-azx up /path/to/app --local-deploy                 # what-if only: a safe preview
-azx up /path/to/app --local-deploy --yes \
-  --pg-password 'Str0ng!Pass'                       # apply for real (password only if Postgres)
+azx up /path/to/app --local-deploy                 # non-mutating what-if; existing RG required
+# Inject AZX_PG_PASSWORD through your shell's secure environment or secret manager.
+azx up /path/to/app --local-deploy --yes             # apply for real
 ```
 
 What happens: `az account show` (auth gate) → `az group create` → `az deployment
@@ -420,7 +423,7 @@ subscription), and sets the repo **variables** `AZURE_CLIENT_ID` / `AZURE_TENANT
 `AZURE_SUBSCRIPTION_ID` (no secret stored). Then, in the generated repo:
 
 - add a repo **secret** `PG_ADMIN_PASSWORD` if your app provisions Postgres (it must
-  match the `--pg-password` you used in Phase 1, or the first what-if won't be a no-op),
+  match `AZX_PG_PASSWORD` from Phase 1, or the first what-if won't be a no-op),
 - (recommended) in **Settings → Environments**, add required reviewers to
   `production` so the real deploy waits on approval, and
 - (recommended) protect `main`. The what-if job needs deploy-equivalent rights, so
@@ -437,7 +440,7 @@ The pipeline's first `what-if` job should report **no changes** — it adopted t
 resources Phase 1 created rather than duplicating them. From then on, every push to
 `main` deploys through review + OIDC; no local credentials, no ad-hoc `az`.
 
-> **Cleanup:** local deploy (and even a what-if preview) creates a resource group.
+> **Cleanup:** an approved local deploy creates a resource group; preview does not.
 > Remove everything with `az group delete -n rg-<app> --yes --no-wait`.
 
 ---

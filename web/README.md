@@ -109,20 +109,33 @@ token** and a **GitHub token** in memory, so **XSS is the crown-jewel risk**. Mi
 
 - **Strict CSP** (in `index.html`): `default-src 'none'`, no inline scripts, scripts
   only from `self` + `esm.sh` (MSAL), `connect-src` pinned to Azure ARM + the GitHub
-  API + esm.sh. The Worker isn't in `connect-src` because the SPA never fetches it —
-  it's reached via `window.open` + `postMessage` (popup) or a top-level redirect.
-- **Tokens are tab-scoped, not memory-only.** To survive the redirect sign-in flow
-  and page reloads, tokens live in **`sessionStorage`** (MSAL cache + the GitHub
-  session), which is origin-scoped and **cleared when the tab closes**. The GitHub
-  session additionally carries an **8-hour TTL** and is dropped if the token is
-  revoked; Azure re-validates silently against MSAL's cached account. This is a
-  deliberate trade: closing the tab still signs you out, but a reload no longer does.
-- **OAuth token delivery is origin-pinned**: in popup mode the Worker `postMessage`s
-  to your exact Pages origin (never `*`); in redirect mode it 302s the token back only
-  to a return URL that `startsWith` `ALLOWED_ORIGIN`, else it falls back to the Pages
-  origin — so a forged return URL can't exfiltrate the token.
+  API + esm.sh. The Worker isn't in `connect-src` because the SPA reaches it through
+  a top-level OAuth redirect.
+- **GitHub tokens are memory-only.** A local bootstrap validates OAuth state and strips
+  the token fragment before loading the app or MSAL. Reloading therefore requires a
+  fresh GitHub sign-in. MSAL keeps its own Azure session in tab-scoped
+  `sessionStorage` so Entra redirect flows can complete.
+- **OAuth token delivery is application-path-pinned**: the Worker accepts redirect
+  state only for the exact configured application origin and path, then returns the
+  token in a URL fragment. Popup `postMessage` delivery is intentionally disabled
+  because GitHub Pages project sites under one account share an origin.
 - The engine treats the scanned repo as **untrusted data** (same validation as the
   CLI): the ledger/scaffold regexes and `isDeployLedger` guard run unchanged in-browser.
+
+#### Clickjacking headers
+
+The meta CSP in `index.html` meaningfully restricts scripts, connections, objects, and
+forms, but **cannot enforce `frame-ancestors`**. GitHub Pages does not provide a way for
+this repository to set response headers, so the hosted Pages deployment does not claim
+clickjacking protection. If the static files are served from a configurable host or CDN,
+set this HTTP response header on every HTML response:
+
+```text
+Content-Security-Policy: default-src 'none'; script-src 'self' https://esm.sh; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://login.microsoftonline.com https://management.azure.com https://api.github.com https://github.com https://esm.sh; frame-src https://login.microsoftonline.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; upgrade-insecure-requests
+```
+
+`X-Frame-Options: DENY` is also appropriate as a legacy fallback. These must be real HTTP
+headers; adding either directive to a meta tag does not protect against framing.
 
 ### Left to CI on purpose
 
