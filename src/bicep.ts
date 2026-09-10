@@ -54,7 +54,7 @@ export function bicepString(value: string): string {
   if (typeof value !== "string") throw new Error("Bicep string value must be a string");
   return `'${value
     .replace(/\\/g, "\\\\")
-    .replace(/'/g, "''")
+    .replace(/'/g, "\\'")
     .replace(/\$\{/g, "\\${")
     .replace(/\r/g, "\\r")
     .replace(/\n/g, "\\n")}'`;

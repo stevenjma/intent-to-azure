@@ -161,7 +161,7 @@ export function githubSignIn(config) {
     const csrf = crypto.randomUUID();
     const scope = config.githubScopes || "repo workflow read:user";
     const base = config.githubWorkerUrl.replace(/\/$/, "");
-    const returnUrl = window.location.origin + window.location.pathname;
+    const returnUrl = new URL(".", window.location.href).href;
     const redirectState = `${csrf}.r.${b64urlEncode(returnUrl)}`;
     try {
       sessionStorage.setItem(OAUTH_STATE_KEY, redirectState);
@@ -511,7 +511,10 @@ export async function createRepoAndPush(repoName, isPrivate, scaffoldFiles, comm
       if (!existing || !existing.sha) throw err;
       const existingContent =
         existing.encoding === "base64" ? decodeBase64Utf8(existing.content) : existing.content;
-      if (existingContent !== f.contents) {
+      const resolution = scaffoldConflictResolution(f.path, existingContent, f.contents, readme);
+      if (resolution === "replace-seed") {
+        await contentsPut(contentPath, { ...body, sha: existing.sha });
+      } else if (resolution === "conflict") {
         throw new Error(
           `Repository ${owner}/${name} contains a modified scaffold file at ${f.path}; refusing to overwrite it.`,
         );
@@ -560,4 +563,10 @@ export async function createRepoAndPush(repoName, isPrivate, scaffoldFiles, comm
     base,
     login: me.login,
   };
+}
+
+export function scaffoldConflictResolution(path, existingContent, generatedContent, seedReadme) {
+  if (existingContent === generatedContent) return "skip";
+  if (path === "README.md" && existingContent === seedReadme) return "replace-seed";
+  return "conflict";
 }

@@ -41,6 +41,10 @@ export const AZURE_SIGNUP_URL = "https://azure.microsoft.com/free/";
 let msal = null;
 let account = null;
 
+function appRedirectUri() {
+  return new URL(".", window.location.href).href;
+}
+
 /** Lazily construct the MSAL app from runtime config. */
 async function ensureMsal(config) {
   if (msal) return msal;
@@ -49,7 +53,7 @@ async function ensureMsal(config) {
     auth: {
       clientId: config.azureClientId,
       authority: `https://login.microsoftonline.com/${config.azureTenant || "common"}`,
-      redirectUri: window.location.origin + window.location.pathname,
+      redirectUri: appRedirectUri(),
     },
     cache: {
       // sessionStorage (not memory) so the redirect fallback survives the
@@ -79,7 +83,7 @@ export function azureSignedIn() {
  * origin — no secret, no user-controlled data.
  */
 export function adminConsentUrl(config) {
-  const redirectUri = window.location.origin + window.location.pathname;
+  const redirectUri = appRedirectUri();
   const params = new URLSearchParams({
     client_id: config.azureClientId,
     redirect_uri: redirectUri,
@@ -270,12 +274,12 @@ export async function azureSignOut() {
   try {
     await app.logoutPopup({
       account: signedOut,
-      postLogoutRedirectUri: window.location.origin + window.location.pathname,
+      postLogoutRedirectUri: appRedirectUri(),
     });
   } finally {
     // Ensure the local MSAL cache is cleared even when the identity-provider
     // logout popup is blocked or closed.
-    await app.getTokenCache().removeAccount(signedOut).catch(() => {});
+    await app.clearCache({ account: signedOut });
   }
 }
 

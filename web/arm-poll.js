@@ -5,7 +5,7 @@ const PENDING = new Set([
 ]);
 
 function retryDelayMs(value, now) {
-  let seconds = Number(value);
+  let seconds = value == null || String(value).trim() === "" ? Number.NaN : Number(value);
   if (!Number.isFinite(seconds)) {
     const dateMs = Date.parse(value || "");
     seconds = Number.isFinite(dateMs) ? (dateMs - now()) / 1000 : 5;

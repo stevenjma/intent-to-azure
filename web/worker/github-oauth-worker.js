@@ -16,10 +16,8 @@
  *   GITHUB_CLIENT_ID      – OAuth App client id (public)
  *   GITHUB_CLIENT_SECRET  – OAuth App client secret (SECRET)
  *   ALLOWED_ORIGIN        – exact Pages origin, e.g. https://you.github.io
- *   APP_URL               – optional; fallback return URL for redirect mode when
- *                           the state-encoded return URL is missing/invalid.
- *                           Defaults to ALLOWED_ORIGIN. Set to the full app URL
- *                           for project sites, e.g. https://you.github.io/app/.
+ *   APP_URL               – exact full app URL used for redirect validation,
+ *                           e.g. https://you.github.io/app/.
  *   ALLOW_SIGNUP          – optional; "true" (default) lets users without a
  *                           GitHub account sign up mid-flow. Set "false" to keep
  *                           the OAuth screen sign-in-only for a closed audience.
@@ -35,6 +33,18 @@ export default {
           status: 405,
           headers: { Allow: "GET", "Cache-Control": "no-store" },
         });
+      }
+      if (!hasValidConfiguration(env)) {
+        return Response.json(
+          { status: "error" },
+          {
+            status: 503,
+            headers: {
+              "Cache-Control": "no-store",
+              "X-Content-Type-Options": "nosniff",
+            },
+          },
+        );
       }
       return Response.json(
         { status: "ok" },
@@ -95,6 +105,32 @@ export default {
     return new Response("azx github oauth worker", { status: 200 });
   },
 };
+
+function hasValidConfiguration(env) {
+  if (
+    typeof env.GITHUB_CLIENT_ID !== "string" ||
+    !env.GITHUB_CLIENT_ID.trim() ||
+    typeof env.GITHUB_CLIENT_SECRET !== "string" ||
+    !env.GITHUB_CLIENT_SECRET.trim() ||
+    typeof env.ALLOWED_ORIGIN !== "string" ||
+    typeof env.APP_URL !== "string"
+  ) {
+    return false;
+  }
+  try {
+    const allowedOrigin = new URL(env.ALLOWED_ORIGIN);
+    const appUrl = new URL(env.APP_URL);
+    return (
+      allowedOrigin.protocol === "https:" &&
+      allowedOrigin.origin === env.ALLOWED_ORIGIN &&
+      appUrl.protocol === "https:" &&
+      appUrl.origin === allowedOrigin.origin &&
+      !appUrl.hash
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The SPA encodes the flow in the OAuth `state` (the only value GitHub round-trips):

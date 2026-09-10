@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+const DJANGO_EXAMPLE = fileURLToPath(new URL("../examples/django-notes/", import.meta.url));
 const SUB = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 
 function repoWithCorruptLedger(): string {
@@ -31,6 +32,12 @@ function runShip(root: string, extra: string[]): { status: number | null; out: s
   const r = spawnSync(process.execPath, [CLI, "ship", root, ...extra], { encoding: "utf8" });
   return { status: r.status, out: (r.stdout ?? "") + (r.stderr ?? "") };
 }
+
+test("plain ship remains an offline preview when the plan has assumptions", () => {
+  const result = runShip(DJANGO_EXAMPLE, ["--json"]);
+  assert.equal(result.status, 0, result.out);
+  assert.match(result.out, /"executed": false/);
+});
 
 test("an unreadable ledger fails loud when no explicit targeting is given", () => {
   const root = repoWithCorruptLedger();

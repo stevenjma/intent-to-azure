@@ -25,7 +25,7 @@ import { createHash } from "node:crypto";
 
 import type { AzurePlan, DeployLedger } from "./types.js";
 import { SUBSCRIPTION_ID_RE } from "./ledger.js";
-import { planNeedsPgPassword } from "./plan.js";
+import { blockingConfirmations, planNeedsPgPassword } from "./plan.js";
 
 export { planNeedsPgPassword } from "./plan.js";
 
@@ -66,6 +66,8 @@ export interface LocalDeployOptions {
   pgPassword?: string;
   /** Actually create resources. When false (default) stops after what-if. */
   apply?: boolean;
+  /** Explicitly accept confirmation cards that state a concrete assumption. */
+  acceptAssumptions?: boolean;
   /** Injectable clock for deterministic deployment names / ledger timestamps. */
   now?: () => Date;
 }
@@ -166,7 +168,7 @@ export function runLocalDeploy(
 ): LocalDeployResult {
   const steps: string[] = [];
   const needsPg = planNeedsPgPassword(plan);
-  const unresolved = plan.confirmations.filter((c) => c.confidence !== "high");
+  const unresolved = blockingConfirmations(plan, opts.acceptAssumptions);
   if (unresolved.length) {
     throw new Error(
       `refusing to deploy with ${unresolved.length} unresolved confirmation(s): ${unresolved.map((c) => c.id).join(", ")}. ` +
@@ -326,7 +328,13 @@ export function runLocalDeploy(
     return { applied: true, blocked: false, steps, whatIf: whatIf.stdout, ledger: ledgerBase };
   } finally {
     if (paramsDir) {
-      rmSync(paramsDir, { recursive: true, force: true });
+      try {
+        rmSync(paramsDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      } catch (cleanupError) {
+        process.emitWarning(
+          `could not remove temporary Azure parameter directory ${paramsDir}: ${(cleanupError as Error).message}`,
+        );
+      }
     }
   }
 }

@@ -26,7 +26,7 @@ import { readRepo, type RepoScan } from "./read-repo.js";
 import { extractIntent } from "./extract-intent.js";
 import { loadGuardrails, parseGuardrails } from "./guardrails.js";
 import { loadBudget, normalizeBudget } from "./budget.js";
-import { plan as planIntent } from "./plan.js";
+import { blockingConfirmations, plan as planIntent } from "./plan.js";
 import { generateBicep } from "./bicep.js";
 import { loadLedger, persistLedger, REGION_RE, RESOURCE_GROUP_RE, SUBSCRIPTION_ID_RE } from "./ledger.js";
 import { dryRun } from "./run.js";
@@ -52,6 +52,7 @@ interface Values {
   "subscription-id"?: string;
   against?: string;
   yes?: boolean;
+  "accept-assumptions"?: boolean;
   "no-bicep"?: boolean;
   "no-color"?: boolean;
   help?: boolean;
@@ -80,6 +81,7 @@ function main(argv: string[]): number {
         "subscription-id": { type: "string" },
         against: { type: "string" },
         yes: { type: "boolean" },
+        "accept-assumptions": { type: "boolean" },
         "no-bicep": { type: "boolean" },
         "no-color": { type: "boolean" },
         help: { type: "boolean", short: "h" },
@@ -466,7 +468,9 @@ function cmdLocalDeploy(
   values: Values,
   c: Color,
 ): number {
-  if (hasBlockingConfirmations(plan)) return renderConfirmationBlock("deploy", intent, plan, values, c);
+  if (blockingConfirmations(plan, !!values["accept-assumptions"]).length) {
+    return renderConfirmationBlock("deploy", intent, plan, values, c);
+  }
   if (plan.budget.blocked) {
     process.stdout.write(banner(c, `deploy ${intent.app.name}`));
     process.stdout.write(c.red("\n✗ Blocked by budget guardrail — refusing to deploy.\n"));
@@ -531,6 +535,7 @@ function cmdLocalDeploy(
       subscriptionId,
       pgPassword: process.env.AZX_PG_PASSWORD,
       apply,
+      acceptAssumptions: !!values["accept-assumptions"],
     });
   } catch (err) {
     // A partial failure still created a real (billable) resource group — persist
@@ -650,7 +655,6 @@ function cmdLocalDeploy(
 function cmdShip(repoArg: string, values: Values, c: Color): number {
   const root = resolve(repoArg);
   const { intent, plan, bicep } = buildAll(root, values);
-  if (hasBlockingConfirmations(plan)) return renderConfirmationBlock("ship", intent, plan, values, c);
   if (values.deploy) {
     throw new Error(
       "--deploy cannot honestly deploy a newly created repo before OIDC exists. " +
@@ -690,6 +694,7 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
     visibility: (values.private === false ? "public" : "private") as "public" | "private",
     deploy: values.deploy,
     outDir: values.out,
+    acceptAssumptions: !!values["accept-assumptions"],
     // Normally `ship` targets via the adopted ledger (or plan defaults) and ignores
     // these flags. Only when RECOVERING from an unreadable ledger do we honor the
     // operator's explicit targeting so the scaffold can still pin the live RG / region
@@ -758,6 +763,9 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
   const execute = !!values["create-repo"];
 
   if (execute) {
+    if (blockingConfirmations(plan, !!values["accept-assumptions"]).length) {
+      return renderConfirmationBlock("ship", intent, plan, values, c);
+    }
     const result = runShip(intent, plan, bicep, shipOpts);
     if (values.json) {
       process.stdout.write(JSON.stringify({ ...result, adoption, recovered }, null, 2) + "\n");
@@ -812,10 +820,6 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
   return 0;
 }
 
-function hasBlockingConfirmations(plan: AzurePlan): boolean {
-  return plan.confirmations.some((confirmation) => confirmation.confidence !== "high");
-}
-
 function renderConfirmationBlock(
   action: "deploy" | "ship",
   intent: AppIntent,
@@ -823,10 +827,13 @@ function renderConfirmationBlock(
   values: Values,
   c: Color,
 ): number {
-  const unresolved = plan.confirmations.filter((confirmation) => confirmation.confidence !== "high");
+  const acceptingAssumptions = !!values["accept-assumptions"];
+  const unresolved = blockingConfirmations(plan, acceptingAssumptions);
   const message =
     `refusing to ${action}: ${unresolved.length} medium/low confirmation(s) are unresolved. ` +
-    "Add explicit guardrails or update the App Intent, then regenerate the plan.";
+    (acceptingAssumptions
+      ? "These decisions have no safe default; update the App Intent or guardrails, then regenerate the plan."
+      : "Review the listed assumptions and pass --accept-assumptions, or update the App Intent/guardrails.");
   if (values.json) {
     process.stdout.write(JSON.stringify({ error: message, confirmations: unresolved }, null, 2) + "\n");
   } else {
@@ -1112,6 +1119,7 @@ function printUsage(): void {
       "  --subscription <file>  budget context (mock subscription.json)",
       "  --against <plan.json>  what-if: baseline plan to diff against (azx plan --json)",
       "  --yes                  approve: what-if apply / up --local-deploy real deploy",
+      "  --accept-assumptions   accept confirmation cards that state a concrete default",
       "  --out <file|dir>       write Bicep/schema to a file, or the ship scaffold to a dir",
       "  --scaffold <dir>       plan: also write the full deploy repo tree (Bicep + CI/CD)",
       "  --create-repo <o/n>    ship: create + push a real GitHub repo (owner/name)",

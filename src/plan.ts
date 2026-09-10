@@ -453,6 +453,17 @@ function buildPlanConfirmations(
   return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
+export function blockingConfirmations(
+  plan: AzurePlan,
+  acceptAssumptions = false,
+): Confirmation[] {
+  return plan.confirmations.filter(
+    (confirmation) =>
+      confirmation.confidence !== "high" &&
+      (!acceptAssumptions || !confirmation.assumption),
+  );
+}
+
 function buildWarnings(needs: Need[], guardrails?: Guardrails): string[] {
   const warnings: string[] = [];
   // If a guardrail allow-list removed every model from a chat-model need, flag it.

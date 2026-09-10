@@ -38,6 +38,7 @@ test("Bicep escapes every untrusted string sink", () => {
   assert.ok(!bicep.includes("\nresource injected"));
   assert.ok(bicep.includes("\\${resourceGroup().id}"));
   assert.ok(bicep.includes("\\\\path"));
+  assert.ok(bicep.includes("x\\'\\${"));
   assert.match(bicep, /\\nresource injected/);
 });
 
@@ -86,13 +87,36 @@ test("unknown future OpenAI model names remain deployable without unsafe substit
 test("medium/low confirmations fail closed in local deploy and ship library APIs", () => {
   const p = plan(baseIntent);
   let calls = 0;
-  const runner: AzRunner = () => { calls++; return { status: 0, stdout: "", stderr: "" }; };
+  const runner: AzRunner = (args) => {
+    calls++;
+    return {
+      status: 0,
+      stdout: args[0] === "account" && args[1] === "show"
+        ? JSON.stringify({ id: "3f2504e0-4f89-41d3-9a0c-0305e82c3301" })
+        : args[0] === "group" && args[1] === "exists"
+          ? "true"
+        : "{}",
+      stderr: "",
+    };
+  };
   assert.throws(
     () => runLocalDeploy(p, { bicepPath: "main.bicep", resourceGroup: "rg-test", region: "eastus2" }, runner),
     /unresolved confirmation/,
   );
   assert.equal(calls, 0);
   assert.throws(() => runShip(baseIntent, p, "", {}, () => {}), /unresolved confirmation/);
+  assert.doesNotThrow(() =>
+    runLocalDeploy(
+      p,
+      {
+        bicepPath: "main.bicep",
+        resourceGroup: "rg-test",
+        region: "eastus2",
+        acceptAssumptions: true,
+      },
+      runner,
+    ),
+  );
 });
 
 test("block budgets fail closed for unbounded consumption", () => {

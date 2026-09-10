@@ -18,6 +18,7 @@ import { dirname, join, resolve } from "node:path";
 
 import type { AppIntent, AzurePlan } from "./types.js";
 import { buildScaffold, slugify, type ScaffoldFile, type ScaffoldOptions } from "./scaffold.js";
+import { blockingConfirmations } from "./plan.js";
 
 /** One planned/executed shell step. */
 export interface ShipStep {
@@ -38,6 +39,8 @@ export interface ShipOptions extends ScaffoldOptions {
   deploy?: boolean;
   /** Local directory to write the scaffold into (defaults to a repo-named dir). */
   outDir?: string;
+  /** Explicitly accept confirmation cards that state a concrete assumption. */
+  acceptAssumptions?: boolean;
 }
 
 export interface ShipPlan {
@@ -180,7 +183,7 @@ export function runShip(
   opts: ShipOptions = {},
   runner: CommandRunner = defaultRunner(),
 ): ShipResult {
-  const unresolved = plan.confirmations.filter((c) => c.confidence !== "high");
+  const unresolved = blockingConfirmations(plan, opts.acceptAssumptions);
   if (unresolved.length) {
     throw new Error(
       `refusing to ship with ${unresolved.length} unresolved confirmation(s): ${unresolved.map((c) => c.id).join(", ")}. ` +

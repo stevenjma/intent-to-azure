@@ -261,6 +261,7 @@ FLAGS
   --private/--no-private ship: repo visibility (default: private)
   --local-deploy         up: REALLY deploy to Azure via `az` (needs `az login`)
   --yes                  up --local-deploy: apply for real (else what-if only)
+  --accept-assumptions   accept confirmation cards that state a concrete default
   --resource-group <rg>  up --local-deploy: target RG (default rg-<app>)
   --region <r>           up --local-deploy: target region (default: plan region)
   AZX_PG_PASSWORD        environment: PostgreSQL admin password (never placed in child argv)
@@ -273,8 +274,9 @@ FLAGS
 `ship --create-repo` are the only paths that leave the machine: `up --local-deploy`
 calls `az` directly, while `ship` only runs git + `gh` (the real `az deployment group
 create` runs inside the pushed GitHub Actions pipeline via OIDC — azx never calls it).
-Real local deploy and `ship` also fail closed while any medium/low confirmation card
-is unresolved; add explicit guardrails or update the App Intent before provisioning.
+Real local deploy and `ship --create-repo` fail closed while any medium/low confirmation
+card is unresolved. Review concrete defaults and pass `--accept-assumptions`, or add
+explicit guardrails/update the App Intent. Plain `ship` remains an offline preview.
 
 ---
 
@@ -338,7 +340,7 @@ azx plan /path/to/app --scaffold ./out
 azx ship /path/to/app
 
 # for real: create + push a private GitHub repo (needs `gh auth login`)
-azx ship /path/to/app --create-repo my-org/my-app
+azx ship /path/to/app --create-repo my-org/my-app --accept-assumptions
 
 # Then configure OIDC in the created repo before manually triggering deploy.yml.
 ```
