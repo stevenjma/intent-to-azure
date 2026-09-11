@@ -262,6 +262,18 @@ test("production probes require an explicit Worker deployment identity", () => {
   }
 });
 
+test("production health buffers curl responses before matching under pipefail", () => {
+  const workflow = source(".github/workflows/health.yml");
+  assert.match(workflow, /page_html="\$\(curl/);
+  assert.match(workflow, /release_json="\$\(curl/);
+  assert.match(workflow, /jq -e --arg sha "\$RELEASE_SHA" '\.sha == \$sha'/);
+  assert.doesNotMatch(workflow, /curl[\s\S]*?\|\s*\n\s*grep -q/);
+});
+
+test("every pull request creates all required E2E check contexts", () => {
+  assert.match(source(".github/workflows/e2e.yml"), /pull_request: \{\}/);
+});
+
 test("Pages uploads the artifact filename required by deploy-pages", () => {
   const workflow = source(".github/workflows/pages.yml");
   assert.match(workflow, /\$RUNNER_TEMP\/artifact\.tar/);
