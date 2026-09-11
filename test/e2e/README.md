@@ -42,7 +42,7 @@ hand-authored Next.js tree you can edit.
 | --- | --- | --- | --- | --- | --- |
 | `next-minimal`         | `next` dep + `next.config.mjs` | web-compute | app-env, web | ✅ pass | ✅ pass |
 | `next-prisma-postgres` | `prisma/schema.prisma` (postgresql) | + transactional-relational | + postgres, postgres-db | ✅ pass | ✅ pass |
-| `next-openai`          | `app/api/chat/route.ts` (gpt-4o) | + chat-model | + openai, openai-deploy-gpt-4o-62gtzg | ✅ pass | ⚠️ catalog-dependent |
+| `next-openai`          | `app/api/chat/route.ts` (gpt-4o) | + chat-model | + openai, openai-deploy-gpt-4o-62gtzg | ✅ pass | ✅ pass |
 | `next-blob-storage`    | `lib/blob.ts` (`BlobServiceClient`) | + object-storage | + storage, blob | ✅ pass | ✅ pass |
 
 `expectations.json` is the source of truth and was **derived from validated `azx plan
@@ -53,10 +53,9 @@ hand-authored Next.js tree you can edit.
 ## Gate status
 
 The original Cognitive Services subdomain and empty Container Apps template bugs are
-fixed. All fixtures compile, and the standard fixtures pass Azure what-if when optional
-OIDC variables are configured. The `next-openai` what-if remains catalog-dependent:
-Azure can reject a correctly generated deployment when the requested model version is
-retired in the selected region.
+fixed. All fixtures compile and pass Azure what-if when optional OIDC variables are
+configured. OpenAI model availability remains an external catalog dependency, so a
+future regional retirement will fail the gate and require an explicit baseline decision.
 
 ---
 
@@ -99,16 +98,9 @@ Flags: `--sub <id>` (default = current `az` context), `--region <r>` (default fr
 `expectations.json`), `--keep`. If you pass `--whatif` without being logged in, the
 runner stops with a clear message rather than silently skipping.
 
-With what-if on, `next-minimal` reports **what-if = KNOWN (bug2)** — Azure's
-validator rejects the empty container app with the real errors:
-
-```
-ContainerAppCreateMustContainContainer - Must specify atleast one container ...
-ContainerAppInvalidResourceTotal       - requested CPU and memory (CPU: 0, memory: 0) is invalid ...
-```
-
-That is bug2 observed live, not merely asserted. `next-openai` auto-**skips**
-what-if because it never compiles (bug1).
+With what-if on, every committed fixture is expected to pass. A failure is either a
+code-generation regression or an Azure catalog/platform change; the harness fails
+closed so the new result must be investigated rather than silently accepted.
 
 To **tinker**: edit a fixture (add a dep, a route, an env var), re-run the runner,
 and watch which gate moves. If you change what azx *should* produce, update
@@ -152,4 +144,3 @@ or `-AppId <id>` (PowerShell); the script then removes legacy federation and bro
 Contributor assignments before verifying the resource-group scopes.
 
 With the variables present, trusted `main` runs exercise the real ARM what-if gate.
-The OpenAI fixture remains catalog-dependent because model versions vary by region.
