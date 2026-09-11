@@ -32,5 +32,5 @@ try {
   /* storage may be unavailable outside an OAuth return */
 }
 
-const { boot } = await import("./app.js?v=20260910b");
+const { boot } = await import("./app.js?v=20260911a");
 boot(oauthResult);

@@ -174,7 +174,12 @@ function wireComputeDependencies(resources: AzureResource[]): void {
 
 /** Replace the `${appName}` token in resource names (storage has stricter rules). */
 function materializeNames(resources: AzureResource[], appName: string): void {
-  const slug = appName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "app";
+  const hyphenated = appName.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+  let slugStart = 0;
+  let slugEnd = hyphenated.length;
+  while (slugStart < slugEnd && hyphenated[slugStart] === "-") slugStart++;
+  while (slugEnd > slugStart && hyphenated[slugEnd - 1] === "-") slugEnd--;
+  const slug = hyphenated.slice(slugStart, slugEnd) || "app";
   const hash = stableHash(appName);
   for (const r of resources) {
     if (!r.name.includes("${appName}")) continue;

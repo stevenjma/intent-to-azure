@@ -19,7 +19,7 @@ has two known codegen bugs — those are encoded as *expected* outcomes (see bel
 | **analyzed**   | `azx plan --json` runs and emits valid JSON | no |
 | **plan-match** | `intent.needs` + `plan.resources` (id+type) + region **exactly** match `expectations.json` | no |
 | **compile**    | `az bicep build` on the emitted template succeeds | no |
-| **what-if**    | `az deployment group what-if` against an ephemeral RG passes preflight | **yes** (BYO-Azure) |
+| **what-if**    | `az deployment group what-if` against a dedicated validation RG passes preflight | **yes** (BYO-Azure) |
 
 **Contract:**
 - **plan-match is the hard gate.** Any drift in needs, resource ids/types, or region
@@ -138,11 +138,18 @@ scripts/setup-azure-oidc.sh --subscription <your-sub-id>      # bash
 scripts/setup-azure-oidc.ps1 -Subscription <your-sub-id>      # PowerShell
 ```
 
-That creates a federated Entra app, grants it Contributor on the subscription, and
-sets three repo **variables** (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
-`AZURE_SUBSCRIPTION_ID`). The workflow then logs in via `azure/login@v2`, spins up an
-ephemeral resource group per run, runs what-if, and deletes the RG afterward. Revoke
-anytime with `az ad app delete --id <appId>`.
+That creates a main-branch-only federated Entra app and four persistent, empty
+validation resource groups. The app receives Contributor only on those groups—not
+the subscription—and the setup writes three repo **variables**
+(`E2E_AZURE_CLIENT_ID`, `E2E_AZURE_TENANT_ID`, `E2E_AZURE_SUBSCRIPTION_ID`). These
+are deliberately separate from the hosted SPA's `AZURE_CLIENT_ID`. Pull-request jobs
+compile and plan offline but cannot obtain Azure credentials. Revoke anytime with
+`az ad app delete --id <appId>`.
 
-With creds present you'll see what-if report **fail (known: bug2)** for the three
-container apps — proving the second, deeper gate works.
+The scripts refuse to reuse an app by display name because Entra display names are
+not unique. To harden or repair an existing setup, rerun with `--app-id <id>` (bash)
+or `-AppId <id>` (PowerShell); the script then removes legacy federation and broad
+Contributor assignments before verifying the resource-group scopes.
+
+With the variables present, trusted `main` runs exercise the real ARM what-if gate.
+The OpenAI fixture remains catalog-dependent because model versions vary by region.

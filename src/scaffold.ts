@@ -45,10 +45,12 @@ export interface ScaffoldOptions {
 
 /** Lowercase, hyphenated slug safe for resource-group / repo names. */
 export function slugify(name: string): string {
-  const s = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  const hyphenated = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  let start = 0;
+  let end = hyphenated.length;
+  while (start < end && hyphenated[start] === "-") start++;
+  while (end > start && hyphenated[end - 1] === "-") end--;
+  const s = hyphenated.slice(start, end);
   return s || "app";
 }
 

@@ -64,7 +64,7 @@ test("OAuth Worker health endpoint is unauthenticated and discloses no configura
   const result = await worker.fetch(new Request("https://worker.example/health"), secrets);
   assert.equal(result.status, 200);
   assert.equal(result.headers.get("cache-control"), "no-store");
-  assert.deepEqual(await result.json(), { status: "ok" });
+  assert.deepEqual(await result.json(), { status: "ok", deployment: "unknown" });
   const serialized = await (await worker.fetch(
     new Request("https://worker.example/health"),
     secrets,
@@ -83,7 +83,7 @@ test("OAuth Worker health endpoint is unauthenticated and discloses no configura
     { ...secrets, GITHUB_CLIENT_SECRET: "" },
   );
   assert.equal(unhealthy.status, 503);
-  assert.deepEqual(await unhealthy.json(), { status: "error" });
+  assert.deepEqual(await unhealthy.json(), { status: "error", deployment: "unknown" });
 });
 
 test("ARM polling continues through HTTP 200 Running until explicit success", async () => {
@@ -209,4 +209,47 @@ test("Pages documentation does not claim meta CSP prevents framing", () => {
   const readme = source("web/README.md");
   assert.match(readme, /cannot enforce `frame-ancestors`/);
   assert.match(readme, /must be real HTTP\s+headers/);
+});
+
+test("hosted preview states that it provisions infrastructure, not application code", () => {
+  const html = source("web/index.html");
+  assert.match(html, /Public preview/);
+  assert.match(html, /does not build or deploy your application code/);
+  assert.match(html, /Microsoft placeholder images/);
+  assert.match(html, /GitHub Issues/);
+});
+
+test("production probes require an explicit Worker deployment identity", () => {
+  for (const workflow of [
+    source(".github/workflows/health.yml"),
+    source(".github/workflows/deploy-worker.yml"),
+  ]) {
+    assert.match(workflow, /jq -e '\.status == "ok"'/);
+    assert.match(workflow, /\.deployment \| type == "string" and length > 0 and \. != "unknown"/);
+    assert.doesNotMatch(workflow, /! grep -q '"deployment":"unknown"'/);
+  }
+});
+
+test("Pages uploads the artifact filename required by deploy-pages", () => {
+  const workflow = source(".github/workflows/pages.yml");
+  assert.match(workflow, /\$RUNNER_TEMP\/artifact\.tar/);
+  assert.match(workflow, /\$\{\{ runner\.temp \}\}\/artifact\.tar/);
+  assert.doesNotMatch(workflow, /github-pages\.tar/);
+});
+
+test("E2E OIDC setup fails closed when reusing or granting access", () => {
+  const bash = source("scripts/setup-azure-oidc.sh");
+  const powershell = source("scripts/setup-azure-oidc.ps1");
+
+  assert.match(bash, /--app-id <existingAppId>/);
+  assert.match(bash, /refusing implicit reuse/);
+  assert.match(bash, /credential_issuer.*ISSUER/);
+  assert.match(bash, /credential_audience.*AUD/);
+  assert.match(bash, /failed to grant Contributor/);
+
+  assert.match(powershell, /-AppId <existingAppId>/);
+  assert.match(powershell, /refusing implicit reuse/);
+  assert.match(powershell, /\$credential\.issuer -ne \$issuer/);
+  assert.match(powershell, /\$audiences\.Count -ne 1/);
+  assert.match(powershell, /failed to grant Contributor/);
 });
