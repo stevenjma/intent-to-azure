@@ -36,6 +36,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+OIDC_USE_DEFAULT="$(gh api "repos/${REPO}/actions/oidc/customization/sub" --jq .use_default)"
+[[ "$OIDC_USE_DEFAULT" == "true" ]] || {
+  echo "custom GitHub OIDC subject templates are not supported by this setup script" >&2
+  exit 1
+}
+SUB_CLAIM_PREFIX="$(gh api "repos/${REPO}/actions/oidc/customization/sub" --jq .sub_claim_prefix)"
+[[ -n "$SUB_CLAIM_PREFIX" ]] || { echo "GitHub returned no OIDC subject prefix" >&2; exit 1; }
 # Default the federated branch to the repo's actual default branch so the branch
 # FIC subject matches real pushes. A hardcoded default silently no-ops for any repo
 # whose default branch differs. Override with --branch.
@@ -69,7 +76,7 @@ az ad sp show --id "$APP_ID" >/dev/null 2>&1 || az ad sp create --id "$APP_ID" >
 
 # Reconcile federation to the trusted branch only. This also removes credentials
 # created by older script versions, including pull_request trust.
-TRUSTED_SUBJECT="repo:${REPO}:ref:refs/heads/${BRANCH}"
+TRUSTED_SUBJECT="${SUB_CLAIM_PREFIX}:ref:refs/heads/${BRANCH}"
 TRUSTED_CREDENTIAL_NAME="gh-branch-${BRANCH//\//-}"
 credential_rows="$(az ad app federated-credential list --id "$APP_ID" \
   --query '[].[id,name,subject,issuer,audiences[0],length(audiences)]' -o tsv)"

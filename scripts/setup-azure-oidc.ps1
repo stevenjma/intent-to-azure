@@ -29,6 +29,14 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repo = gh repo view --json nameWithOwner -q .nameWithOwner
+$oidcUseDefault = gh api "repos/$repo/actions/oidc/customization/sub" --jq .use_default
+if ($LASTEXITCODE -ne 0 -or $oidcUseDefault -ne "true") {
+  throw "custom GitHub OIDC subject templates are not supported by this setup script"
+}
+$subClaimPrefix = gh api "repos/$repo/actions/oidc/customization/sub" --jq .sub_claim_prefix
+if ($LASTEXITCODE -ne 0 -or -not $subClaimPrefix) {
+  throw "GitHub returned no OIDC subject prefix"
+}
 if (-not $Subscription) { $Subscription = az account show --query id -o tsv }
 $tenant = az account show --query tenantId -o tsv
 $issuer = "https://token.actions.githubusercontent.com"
@@ -57,7 +65,7 @@ if ($LASTEXITCODE -ne 0) { az ad sp create --id $appId | Out-Null }
 
 # Reconcile federation to the trusted branch only. This also removes credentials
 # created by older script versions, including pull_request trust.
-$trustedSubject = "repo:${repo}:ref:refs/heads/$Branch"
+$trustedSubject = "${subClaimPrefix}:ref:refs/heads/$Branch"
 $trustedCredentialName = "gh-branch-" + ($Branch -replace '/','-')
 $credentials = az ad app federated-credential list --id $appId -o json | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "failed to list federated credentials" }
