@@ -35,11 +35,8 @@ name: e2e
 
 on:
   workflow_dispatch: {}
-  pull_request:
-    paths:
-      - "test/e2e/**"
-      - ".github/workflows/e2e.yml"
-      - "src/**"
+  # These four matrix jobs are required branch checks, so every PR must create them.
+  pull_request: {}
   push:
     branches: [main]
     paths:
