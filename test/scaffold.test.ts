@@ -146,10 +146,18 @@ test("scaffold ships a repo-parameterized OIDC setup script", () => {
   const script = files.find((f) => f.path === "scripts/setup-azure-oidc.sh");
   assert.ok(script, "expected scripts/setup-azure-oidc.sh to be shipped");
   // It must federate the exact two subjects deploy.yml authenticates as.
-  assert.ok(script!.content.includes("repo:${REPO}:ref:refs/heads/main"), "federates main branch");
   assert.ok(
-    script!.content.includes("repo:${REPO}:environment:production"),
+    script!.content.includes("${SUB_CLAIM_PREFIX}:ref:refs/heads/main"),
+    "federates main branch",
+  );
+  assert.ok(
+    script!.content.includes("${SUB_CLAIM_PREFIX}:environment:production"),
     "federates the production environment",
+  );
+  assert.ok(
+    script!.content.includes("actions/oidc/customization/sub") &&
+      script!.content.includes(".sub_claim_prefix"),
+    "uses GitHub's authoritative mutable or immutable OIDC subject prefix",
   );
   // And resolve the repo it runs inside (not hardcoded to azx's own repo).
   assert.ok(script!.content.includes("gh repo view --json nameWithOwner"), "resolves the current repo");

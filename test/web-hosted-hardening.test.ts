@@ -243,12 +243,16 @@ test("E2E OIDC setup fails closed when reusing or granting access", () => {
 
   assert.match(bash, /--app-id <existingAppId>/);
   assert.match(bash, /refusing implicit reuse/);
+  assert.match(bash, /actions\/oidc\/customization\/sub/);
+  assert.match(bash, /SUB_CLAIM_PREFIX/);
   assert.match(bash, /credential_issuer.*ISSUER/);
   assert.match(bash, /credential_audience.*AUD/);
   assert.match(bash, /failed to grant Contributor/);
 
   assert.match(powershell, /-AppId <existingAppId>/);
   assert.match(powershell, /refusing implicit reuse/);
+  assert.match(powershell, /actions\/oidc\/customization\/sub/);
+  assert.match(powershell, /\$subClaimPrefix/);
   assert.match(powershell, /\$credential\.issuer -ne \$issuer/);
   assert.match(powershell, /\$audiences\.Count -ne 1/);
   assert.match(powershell, /failed to grant Contributor/);
