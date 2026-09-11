@@ -545,33 +545,23 @@ SPEC.md         human-readable contract spec
 
 ## Compatibility & known limitations
 
-The hosted browser app ([`web/`](./web/README.md)) is a **proof of concept**. Who can
-use it today depends entirely on one setting your Azure tenant admin controls — the
-**user-consent policy** — not on your license tier:
+The hosted browser app ([`web/`](./web/README.md)) is a **proof of concept**. Its
+primary deployment path downloads a reviewable script that runs through the user's
+existing Azure CLI or Cloud Shell session. It does not request an azx Entra token, so
+enterprise user-consent policy does not block it.
 
-| Your Azure account | Browser sign-in | Real deploy from the browser |
-|---|---|---|
-| Personal Microsoft account | ✅ works | ✅ works |
-| Work/school tenant that allows user consent | ✅ works | ✅ works |
-| Work/school tenant restricted to *verified-publisher* apps | ✅ works | ⚠️ deploy needs a one-time **admin consent** |
-| Locked-down tenant (no user consent) | ⚠️ needs admin consent | ⚠️ needs admin consent |
-
-**Why:** real deploy requests the Azure Resource Manager `user_impersonation` scope,
-which is high-privilege and **requires tenant admin consent in every enterprise tenant**
-— Publisher Verification does not waive it. The app detects this and surfaces a
-one-click **admin-consent link** (an admin approves once per org). See
+Direct browser provisioning is optional. It requests delegated Azure Resource Manager
+`user_impersonation`; tenants that restrict consent to verified publishers or disable
+user consent may require one-time admin approval. See
 [web/README](./web/README.md#deployment-model-hosted-multi-tenant).
 
-**Escape hatches that always work, regardless of tenant policy:**
+**Other deployment paths:**
 
-- **The CLI** (below) — runs fully offline; `up --local-deploy` deploys through your own
-  `az` login with no third-party app consent.
+- **The CLI** (below) — runs fully offline; `up --local-deploy` deploys through the
+  user's own `az` login.
 - **The codified pipeline** — `ship --create-repo` (or the browser's "codify" path)
   creates a repo whose GitHub Actions **OIDC** pipeline deploys under a per-tenant
   service principal your admin sets up once. No interactive ARM consent needed.
-
-For a PoC launch, the practical audience is personal accounts and permissive
-startup-style tenants; enterprise users are steered to the pipeline path.
 
 ## Scope & guardrails
 

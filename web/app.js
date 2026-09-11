@@ -6,7 +6,7 @@
  * github.js. This file is glue + rendering only; it never persists tokens.
  */
 
-import { resolveScan, generateArmTemplate, planNeedsPgPassword } from "./engine/web-engine.js?v=20260911a";
+import { resolveScan, generateArmTemplate, planNeedsPgPassword } from "./engine/web-engine.js?v=20260911b";
 import {
   githubSignIn,
   githubSignOut,
@@ -19,7 +19,7 @@ import {
   listAccessibleRepos,
   orgGrantUrl,
   searchRepos,
-} from "./github.js?v=20260911a";
+} from "./github.js?v=20260911b";
 import {
   azureSignIn,
   azureSignOut,
@@ -30,7 +30,11 @@ import {
   ensureResourceGroup,
   whatIf,
   deploy,
-} from "./azure.js?v=20260911a";
+} from "./azure.js?v=20260911b";
+import {
+  buildAzureCliScript,
+  deploymentScriptName,
+} from "./azure-cli-handoff.js?v=20260911b";
 
 const cfg = window.AZX_CONFIG || {};
 const $ = (id) => document.getElementById(id);
@@ -44,6 +48,7 @@ let approvedInputRevision = -1;
 let analysisSequence = 0;
 let analysisController = null;
 let confirmationApprovalSequence = -1;
+let lastDownloadedCliFilename = "";
 
 /** The linear stages. `codify`/`deploy` are the two "Act" spokes off `review`. */
 const STAGES = ["source", "review", "codify", "deploy"];
@@ -82,6 +87,8 @@ export function boot(oauthResult = null) {
   $("repo-input").addEventListener("input", onRepoInput);
   $("btn-whatif").addEventListener("click", onWhatIf);
   $("btn-apply").addEventListener("click", onApply);
+  $("btn-download-cli").addEventListener("click", onDownloadAzureCli);
+  $("btn-copy-cli").addEventListener("click", onCopyAzureCliCommand);
   $("btn-ship").addEventListener("click", onShip);
   $("go-codify").addEventListener("click", () => goToStage("codify"));
   $("go-deploy").addEventListener("click", () => goToStage("deploy"));
@@ -96,8 +103,15 @@ export function boot(oauthResult = null) {
     $(id).addEventListener("input", () => {
       if (id === "rg-input") dirty.rg = true;
       if (id === "region-input") dirty.region = true;
+      if (id === "rg-input" || id === "region-input") {
+        lastDownloadedCliFilename = "";
+        const status = $("cli-handoff-status");
+        status.className = "status";
+        status.textContent = "Deployment inputs changed; download a new script.";
+      }
       deployInputRevision++;
       setWhatIfOk(false);
+      updateAvailability();
     });
   }
   $("ship-repo-input").addEventListener("input", () => {
@@ -451,6 +465,8 @@ async function onAnalyze(ev) {
 function resetActionState(owner, repo, plan) {
   dirty.rg = dirty.region = dirty.ship = false;
   $("deploy-log").textContent = "";
+  lastDownloadedCliFilename = "";
+  $("cli-handoff-status").textContent = "";
   $("ship-log").textContent = "";
   const pg = $("pg-password");
   if (pg) pg.value = "";
@@ -679,16 +695,25 @@ function updateAvailability() {
   const subVal = $("sub-select").value;
   const noSubs = azureSignedIn() && $("sub-select").options.length === 0;
   const budgetBlocked = Boolean(current?.plan?.budget?.blocked);
-  let deployReason = "";
-  if (!current) deployReason = "Analyze a repo first.";
-  else if (!azureSignedIn()) deployReason = "Sign in with Azure (top bar) to enable.";
-  else if (noSubs) deployReason = "Signed in, but no Azure subscriptions were found on this account.";
-  else if (!subVal) deployReason = "Pick a subscription.";
-  else if (budgetBlocked) deployReason = "A guardrail blocks this plan's budget — deploy is disabled.";
-  else if (confirmationReason) deployReason = confirmationReason;
-  setReason("deploy-reason", deployReason, "review");
-  setReason("deploy-reason-act", deployReason, "act");
+  let handoffReason = "";
+  if (!current) handoffReason = "Analyze a repo first.";
+  else if (budgetBlocked) handoffReason = "A guardrail blocks this plan's budget — deploy is disabled.";
+  else if (confirmationReason) handoffReason = confirmationReason;
+  setReason("deploy-reason", handoffReason, "review");
+  setReason("deploy-reason-act", handoffReason, "act");
 
+  let browserReason = "";
+  if (!current) browserReason = "Analyze a repo first.";
+  else if (!azureSignedIn()) browserReason = "Optional direct deployment requires Azure sign-in and may require tenant admin approval.";
+  else if (noSubs) browserReason = "Signed in, but no Azure subscriptions were found on this account.";
+  else if (!subVal) browserReason = "Pick a subscription.";
+  else if (budgetBlocked) browserReason = "A guardrail blocks this plan's budget — deploy is disabled.";
+  else if (confirmationReason) browserReason = confirmationReason;
+  setReason("browser-deploy-reason-act", browserReason, "act");
+
+  const canHandoff = Boolean(current) && !budgetBlocked && unresolved.length === 0;
+  $("btn-download-cli").disabled = !canHandoff;
+  $("btn-copy-cli").disabled = !canHandoff || !lastDownloadedCliFilename;
   const canWhatIf =
     Boolean(current) && azureSignedIn() && Boolean(subVal) && !budgetBlocked && unresolved.length === 0;
   $("btn-whatif").disabled = !canWhatIf;
@@ -747,13 +772,70 @@ function setWhatIfOk(ok) {
 
 /** Collect deploy parameters, reading the masked PG password field once. */
 function deployParameters() {
-  const params = {};
+  const params = { location: $("region-input").value.trim() };
   if (planNeedsPgPassword(current.plan)) {
     const pw = $("pg-password").value;
     if (!pw) throw new Error("Enter the PostgreSQL admin password (field above) to deploy this plan.");
     params.postgresAdminPassword = pw;
   }
   return params;
+}
+
+function handoffInputs() {
+  const resourceGroup = $("rg-input").value.trim();
+  const region = $("region-input").value.trim();
+  if (!resourceGroup) throw new Error("Enter a resource group name.");
+  if (!region) throw new Error("Enter a region.");
+  return { resourceGroup, region };
+}
+
+function cliHandoffArtifact() {
+  requireResolvedConfirmations();
+  const { resourceGroup, region } = handoffInputs();
+  const filename = deploymentScriptName(current.appName);
+  const script = buildAzureCliScript({
+    bicep: current.bicep,
+    resourceGroup,
+    region,
+    needsPgPassword: planNeedsPgPassword(current.plan),
+  });
+  return { filename, script };
+}
+
+function onDownloadAzureCli() {
+  const status = $("cli-handoff-status");
+  try {
+    const { filename: baseFilename, script } = cliHandoffArtifact();
+    const filename = baseFilename.replace(/\.sh$/, `-${Date.now()}.sh`);
+    const url = URL.createObjectURL(new Blob([script], { type: "text/x-shellscript;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    lastDownloadedCliFilename = filename;
+    updateAvailability();
+    status.className = "status ok";
+    status.textContent = `Downloaded ${filename}. Upload it to Azure Cloud Shell, review it, then run: bash ${filename}`;
+  } catch (err) {
+    status.className = "status err";
+    status.textContent = err.message;
+  }
+}
+
+async function onCopyAzureCliCommand() {
+  const status = $("cli-handoff-status");
+  try {
+    if (!lastDownloadedCliFilename) throw new Error("Download the deployment script first.");
+    await navigator.clipboard.writeText(`bash ${lastDownloadedCliFilename}`);
+    status.className = "status ok";
+    status.textContent = `Copied: bash ${lastDownloadedCliFilename}`;
+  } catch (err) {
+    status.className = "status err";
+    status.textContent = err.message;
+  }
 }
 
 function deployInputs() {

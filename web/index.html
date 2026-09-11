@@ -42,9 +42,6 @@
         <span class="tagline">App Intent → Azure — no install</span>
       </div>
       <div class="auth-buttons">
-        <button id="btn-azure" class="btn btn-azure" type="button">
-          <span class="dot" data-state="out"></span> Sign in with Azure
-        </button>
         <button id="btn-github" class="btn btn-github" type="button">
           <span class="dot" data-state="out"></span> Sign in with GitHub
         </button>
@@ -161,14 +158,14 @@
             <button id="go-codify" class="btn" type="button">Set up repo →</button>
           </div>
           <div class="action-card">
-            <h4>Preview on Azure (what-if)</h4>
+            <h4>Run on Azure</h4>
             <p class="hint">
-              Runs a real ARM what-if against your subscription, then optionally provisions
-              the infrastructure. Compute resources use Microsoft placeholder images; your
-              application code is not built or deployed.
+              Downloads a reviewable Azure CLI script that creates the target resource group
+              if needed, then runs what-if before application resources. It uses your own Azure
+              CLI session, so this app needs no tenant admin approval.
             </p>
             <div id="deploy-reason" class="reason hidden"></div>
-            <button id="go-deploy" class="btn" type="button">Preview &amp; provision →</button>
+            <button id="go-deploy" class="btn" type="button">Get Azure handoff →</button>
           </div>
         </div>
       </section>
@@ -206,17 +203,14 @@
       <section id="stage-deploy" class="stage hidden">
         <button class="back" data-stage="review" type="button">← Back to review</button>
         <div id="rail-deploy" class="rail"></div>
-        <h2>Provision Azure infrastructure</h2>
+        <h2>Run on Azure</h2>
         <p class="hint">
-          Runs a real ARM <strong>what-if</strong> preview first (always), then creates
-          infrastructure only after you review and confirm. Compute uses Microsoft placeholder
-          images; this does not build, publish, configure, or run your application code.
+          The recommended path runs through your authenticated Azure CLI or Cloud Shell session,
+          so azx never needs tenant consent. The script runs ARM <strong>what-if</strong> first
+          and requires you to type <code>deploy</code> before creating application resources.
+          Compute uses Microsoft placeholder images; application code is not deployed.
         </p>
         <div class="deploy-controls">
-          <label>
-            Subscription
-            <select id="sub-select" disabled></select>
-          </label>
           <label>
             Resource group
             <input id="rg-input" type="text" placeholder="rg-myapp" />
@@ -225,18 +219,57 @@
             Region
             <input id="region-input" type="text" placeholder="eastus2" />
           </label>
-          <label id="pg-field" class="hidden">
-            PostgreSQL admin password
-            <input id="pg-password" type="password" autocomplete="new-password" placeholder="@secure — not stored" />
-          </label>
         </div>
         <div id="deploy-reason-act" class="reason hidden"></div>
-        <div class="deploy-actions">
-          <button id="btn-whatif" class="btn" type="button" disabled>Run what-if</button>
-          <button id="btn-apply" class="btn btn-danger" type="button" disabled>
-            Provision infrastructure
-          </button>
+        <div class="action-card primary cli-handoff">
+          <h4>Azure CLI / Cloud Shell — recommended</h4>
+          <p class="hint">
+            Download one self-contained script. Review it, upload it to Cloud Shell, and run it.
+            It creates the target resource group if needed, then runs what-if. It uses the active
+            subscription unless you set <code>AZURE_SUBSCRIPTION_ID</code>.
+          </p>
+          <ol class="handoff-steps">
+            <li>Download the deployment script.</li>
+            <li>Open Cloud Shell and upload the script.</li>
+            <li>Run the copied command; review what-if before confirming.</li>
+          </ol>
+          <div class="deploy-actions">
+            <button id="btn-download-cli" class="btn" type="button" disabled>Download deployment script</button>
+            <a class="btn" href="https://shell.azure.com/" target="_blank" rel="noopener noreferrer">Open Cloud Shell ↗</a>
+            <button id="btn-copy-cli" class="btn" type="button" disabled>Copy run command</button>
+          </div>
+          <p id="cli-handoff-status" class="status" role="status"></p>
         </div>
+
+        <details class="disclose browser-deploy">
+          <summary>Direct browser provisioning — optional; tenant admin approval may be required</summary>
+          <div>
+            <p class="hint">
+              This path requests delegated Azure Resource Manager access. Many organizations
+              block unverified multi-tenant apps, so use the CLI handoff unless your admin has approved azx.
+            </p>
+            <button id="btn-azure" class="btn btn-azure" type="button">
+              <span class="dot" data-state="out"></span> Sign in with Azure for direct mode
+            </button>
+            <div class="deploy-controls">
+              <label>
+                Subscription
+                <select id="sub-select" disabled></select>
+              </label>
+              <label id="pg-field" class="hidden">
+                PostgreSQL admin password
+                <input id="pg-password" type="password" autocomplete="new-password" placeholder="@secure — not stored" />
+              </label>
+            </div>
+            <div id="browser-deploy-reason-act" class="reason hidden"></div>
+            <div class="deploy-actions">
+              <button id="btn-whatif" class="btn" type="button" disabled>Run browser what-if</button>
+              <button id="btn-apply" class="btn btn-danger" type="button" disabled>
+                Provision in browser
+              </button>
+            </div>
+          </div>
+        </details>
         <pre id="deploy-log" class="code log"></pre>
       </section>
     </main>
@@ -255,6 +288,6 @@
     </footer>
 
     <script src="./config.js?v=20260818a"></script>
-    <script type="module" src="./bootstrap.js?v=20260911a"></script>
+    <script type="module" src="./bootstrap.js?v=20260911b"></script>
   </body>
 </html>

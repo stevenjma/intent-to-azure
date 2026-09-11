@@ -1,9 +1,11 @@
 # azx web — App Intent → Azure, from your browser
 
 A static single-page app that runs the azx engine **in the browser**: point it at a
-GitHub repo, and it infers the Azure the app needs, previews the Bicep + ARM, and can
-do a **real** what-if-gated deploy to your subscription and push a codified pipeline
-repo — all with two buttons: **Sign in with Azure** and **Sign in with GitHub**.
+GitHub repo, and it infers the Azure the app needs, previews the Bicep + ARM, and
+generates a **what-if-gated Azure CLI script** for deployment. The script runs in the
+user's existing Azure CLI or Cloud Shell session, so no third-party Entra consent is
+required. Direct browser provisioning remains available as an optional, admin-approved
+path.
 
 No binary install. The engine is the same TypeScript that powers the `azx` CLI,
 compiled to ES modules and served as static assets.
@@ -11,37 +13,33 @@ compiled to ES modules and served as static assets.
 ## How it works
 
 ```
-GitHub repo ──REST──▶ file map ──▶ scan → intent → plan → Bicep / ARM / scaffold   (in-browser)
-Azure  ◀── ARM REST ── what-if (gate) → deployment create        (MSAL PKCE, no backend)
-GitHub ◀── git-data ── create repo + push scaffold               (OAuth via tiny Worker)
+GitHub repo ──REST──▶ file map ──▶ scan → intent → plan → Bicep / ARM / scaffold (browser)
+Azure      ◀── az CLI script ── what-if → explicit approval → deployment         (primary)
+Azure      ◀── ARM REST ── what-if → deployment create                           (optional)
+GitHub     ◀── git-data ── create repo + push scaffold                           (OAuth Worker)
 ```
 
-- **Azure**: `@azure/msal-browser` (PKCE) → ARM token → ARM REST. 100% client-side;
-  Entra is SPA-native and ARM sends CORS. No secret, no backend.
+- **Azure (primary)**: a self-contained Bash script embeds the generated Bicep and runs
+  through the user's authenticated Azure CLI or Cloud Shell session.
+- **Azure (optional direct mode)**: `@azure/msal-browser` (PKCE) → ARM token → ARM
+  REST. Entra is SPA-native and ARM sends CORS. No secret or backend.
 - **GitHub**: OAuth needs one tiny [token-exchange Worker](./worker/README.md) (the
   code→token step needs the client secret and is CORS-blocked). Everything else —
   reading the repo, creating the repo, pushing the scaffold — is direct REST.
-- **Deploy safety**: the app always runs an ARM **what-if** and shows the predicted
-  changes; the Deploy button stays disabled until you've reviewed a successful what-if.
+- **Deploy safety**: the generated script always runs ARM **what-if** and requires the
+  user to type `deploy` before apply. Optional direct mode also keeps its Deploy button
+  disabled until a successful what-if has been reviewed.
 
 ## Deployment model: hosted multi-tenant
 
-azx runs as **one hosted instance** (the operator's) that **many customers use
-directly** in the browser. There's exactly one Entra app, one GitHub OAuth App, one
-token-exchange Worker, and one Pages origin — all owned by the operator. Each customer
-brings their **own** Azure subscription and **own** GitHub account; their tokens are
-held only in their browser tab (and pass transiently through the Worker for the GitHub
-`code`→token exchange). Customers never configure anything.
+azx runs as **one hosted instance** that many customers use directly. Browser analysis
+and the primary Azure CLI handoff require no azx Entra consent: Azure authentication
+stays in the user's existing first-party CLI or Cloud Shell session.
 
-Because customers sign in from **other** tenants, an **unverified** Entra app can hit an
-admin-consent wall in locked-down tenants. Two things soften this:
-
-- The app detects the admin-consent failure and shows a **one-click admin-consent link**;
-  a tenant admin approves once for their whole org, then their users sign in normally.
-- Completing **Publisher Verification** (see below) removes the "unverified" warning
-  entirely and lets more tenants self-consent.
-
-Tenants that allow user consent work immediately with no admin step.
+The hosted Entra SPA is used only for optional direct browser provisioning. Customers
+from locked-down tenants can hit an admin-consent wall there even though azx requests
+only delegated ARM `user_impersonation`. The app detects that failure and provides an
+admin-consent link, but this is not the default deployment path.
 
 ## Operator setup checklist
 
@@ -97,15 +95,15 @@ npx http-server web -p 8080 # or: python -m http.server 8080 --directory web
 # open http://localhost:8080
 ```
 
-The offline preview (analyze a public repo → intent/plan/Bicep/scaffold) works with no
-config. Azure/GitHub sign-in and deploy need `config.js` + the Worker, and redirect
-URIs registered for `http://localhost:8080` during local testing.
+The offline preview and Azure CLI handoff work with no authentication config. GitHub
+sign-in needs `config.js` + the Worker; optional direct Azure provisioning additionally
+needs an Entra SPA redirect URI registered for `http://localhost:8080`.
 
 ## Security / threat model
 
-The browser threat model is the **inverse** of the CLI's. There's no shell, so the
-CLI's argv/command-injection surface disappears — but the page holds a live **ARM
-token** and a **GitHub token** in memory, so **XSS is the crown-jewel risk**. Mitigations:
+The browser threat model is the **inverse** of the CLI's. The page may hold a live
+**GitHub token** and, only in optional direct mode, an **ARM token**, so **XSS is the
+crown-jewel risk**. Mitigations:
 
 - **Strict CSP** (in `index.html`): `default-src 'none'`, no inline scripts, scripts
   only from `self` + `esm.sh` (MSAL), `connect-src` pinned to Azure ARM + the GitHub
@@ -175,10 +173,9 @@ fork and run their own instance.
 
 ## Publisher Verification (optional but recommended)
 
-Publisher Verification adds the blue "verified" badge to the Entra consent screen and
-lets more tenants self-consent, shrinking how often the admin-consent link is needed.
-It is **not required** to run hosted azx — unverified simply means locked-down tenants
-see the "needs admin approval" screen (which the in-app admin-consent link resolves).
+Publisher Verification adds the blue "verified" badge to the optional direct mode's
+Entra consent screen and lets more tenants self-consent. It is not required for browser
+analysis or the primary Azure CLI handoff.
 
 To complete it later:
 
@@ -188,4 +185,5 @@ To complete it later:
 3. In Entra → App registrations → your app → **Branding & properties**, set the
    **Publisher domain** to a verified domain, then **Add MPN ID to verify publisher**.
 
-Until then, the app's admin-consent link is the working bridge for gated tenants.
+Until then, gated tenants should use the Azure CLI handoff; an admin-consent link remains
+available for organizations that choose to approve direct mode.
