@@ -200,7 +200,7 @@ test("hosted module cache keys move together for release changes", () => {
   const version = html.match(/bootstrap\.js\?v=([^"]+)/)?.[1];
   assert.ok(version);
   assert.ok(bootstrap.includes(`app.js?v=${version}`));
-  for (const module of ["engine/web-engine", "github", "azure"]) {
+  for (const module of ["engine/web-engine", "github", "azure", "azure-cli-handoff"]) {
     assert.ok(app.includes(`${module}.js?v=${version}`));
   }
 });
@@ -217,6 +217,38 @@ test("hosted preview states that it provisions infrastructure, not application c
   assert.match(html, /does not build or deploy your application code/);
   assert.match(html, /Microsoft placeholder images/);
   assert.match(html, /GitHub Issues/);
+});
+
+test("Azure CLI handoff avoids tenant consent and gates deployment behind what-if", async () => {
+  const html = source("web/index.html");
+  const { buildAzureCliScript } = await importSource("web/azure-cli-handoff.js");
+  const script = buildAzureCliScript({
+    bicep: "param location string\nresource demo 'Microsoft.Storage/storageAccounts@2023-05-01' = {\n  name: 'demo'\n  location: location\n  kind: 'StorageV2'\n  sku: { name: 'Standard_LRS' }\n}",
+    resourceGroup: "rg-azx-test",
+    region: "eastus2",
+    needsPgPassword: true,
+  });
+
+  assert.match(html, /needs no tenant admin approval/);
+  assert.match(html, /Azure CLI \/ Cloud Shell — recommended/);
+  assert.match(script, /az deployment group what-if/);
+  assert.match(script, /Type deploy to create these resources/);
+  assert.ok(script.indexOf("az group exists") < script.indexOf("az group create"));
+  assert.ok(script.indexOf("az deployment group what-if") < script.indexOf("az deployment group create"));
+  assert.match(script, /umask 077/);
+  assert.match(script, /PostgreSQL admin password cannot be empty/);
+  assert.match(script, /PARAM_ARGS\+=\("@\$PARAMS_FILE"\)/);
+  assert.doesNotMatch(script, /postgresAdminPassword=\$PG_ADMIN_PASSWORD/);
+  assert.throws(
+    () =>
+      buildAzureCliScript({
+        bicep: "AZX_BICEP_EOF\nresource injected 'x@y' = {}",
+        resourceGroup: "rg-azx-test",
+        region: "eastus2",
+        needsPgPassword: false,
+      }),
+    /cannot be embedded safely/,
+  );
 });
 
 test("production probes require an explicit Worker deployment identity", () => {
