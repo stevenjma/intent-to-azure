@@ -36,7 +36,7 @@ export default {
       }
       if (!hasValidConfiguration(env)) {
         return Response.json(
-          { status: "error" },
+          { status: "error", deployment: env.CF_VERSION_METADATA?.id || "unknown" },
           {
             status: 503,
             headers: {
@@ -47,7 +47,7 @@ export default {
         );
       }
       return Response.json(
-        { status: "ok" },
+        { status: "ok", deployment: env.CF_VERSION_METADATA?.id || "unknown" },
         {
           headers: {
             "Cache-Control": "no-store",

@@ -6,7 +6,8 @@ A release is ready only when:
 
 - `CI`, `CodeQL`, `lockfile-guard`, and applicable `e2e` checks pass.
 - The Pages workflow validates all public configuration and its post-deploy smoke test passes.
-- `Production health` passes against both Pages and the OAuth Worker.
+- `Production health` proves Pages serves the current `main` SHA and the OAuth
+  Worker reports a Cloudflare deployment identity.
 - The OAuth Worker has been deployed from the reviewed commit.
 - The Entra publisher, redirect URIs, GitHub OAuth callback, and Worker `ALLOWED_ORIGIN`
   match the production origin exactly.
@@ -16,6 +17,8 @@ Do not bypass a failed gate. Resolve the failure or roll back.
 ## Monitoring
 
 `.github/workflows/health.yml` probes the Pages application and Worker every 15 minutes.
+The Pages probe compares `release.json` with the workflow's current `main` SHA, so a
+healthy but stale deployment fails the gate.
 Workflow failure notifications are the initial alert channel. Tokens and OAuth responses
 must never be logged; probes use only public health endpoints.
 

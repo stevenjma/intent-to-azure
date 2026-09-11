@@ -6,14 +6,6 @@ name: Deploy SPA to GitHub Pages
 on:
   push:
     branches: [main]
-    paths:
-      - "src/**"
-      - "web/**"
-      - "scripts/build-web.mjs"
-      - "package.json"
-      - "package-lock.json"
-      - "tsconfig.json"
-      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -76,10 +68,22 @@ jobs:
           writeFileSync("web/config.js", `window.AZX_CONFIG = ${JSON.stringify(config, null, 2)};\n`);
           NODE
 
+      - name: Write release identity
+        run: printf '{"sha":"%s"}\n' "$GITHUB_SHA" > web/release.json
+
+      # upload-pages-artifact currently invokes upload-artifact by a mutable tag,
+      # which conflicts with this repository's full-SHA Actions policy. Build the
+      # Pages artifact explicitly and upload it with the pinned action instead.
+      - name: Package Pages artifact
+        run: tar --dereference --hard-dereference --directory web -cvf "$RUNNER_TEMP/artifact.tar" .
+
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          path: web
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
 
   deploy:
     needs: build
@@ -94,10 +98,13 @@ jobs:
       - name: Verify deployed site
         env:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           for attempt in 1 2 3 4 5; do
             if body="$(curl --fail --silent --show-error --location --max-time 20 "$PAGE_URL")" &&
-               grep -q "App Intent" <<<"$body"; then
+               grep -q "App Intent" <<<"$body" &&
+               release="$(curl --fail --silent --show-error --location --max-time 20 "${PAGE_URL%/}/release.json")" &&
+               grep -q "\"sha\":\"$RELEASE_SHA\"" <<<"$release"; then
               exit 0
             fi
             sleep $((attempt * 5))

@@ -52,6 +52,12 @@
     </header>
 
     <main>
+      <section class="banner">
+        <strong>Public preview.</strong> azx plans and provisions Azure infrastructure; it
+        does not build or deploy your application code. Use a test subscription and review
+        every ARM what-if before creating resources.
+      </section>
+
       <section id="setup-banner" class="banner hidden">
         <strong>Setup needed.</strong> Copy <code>web/config.example.js</code> to
         <code>web/config.js</code> and fill in your Entra SPA client ID, GitHub OAuth
@@ -157,12 +163,12 @@
           <div class="action-card">
             <h4>Preview on Azure (what-if)</h4>
             <p class="hint">
-              Runs a real ARM what-if against your subscription, then optionally deploys
-              now. If the resource group does not exist, you must approve creating that
-              prerequisite before preview.
+              Runs a real ARM what-if against your subscription, then optionally provisions
+              the infrastructure. Compute resources use Microsoft placeholder images; your
+              application code is not built or deployed.
             </p>
             <div id="deploy-reason" class="reason hidden"></div>
-            <button id="go-deploy" class="btn" type="button">Preview &amp; deploy →</button>
+            <button id="go-deploy" class="btn" type="button">Preview &amp; provision →</button>
           </div>
         </div>
       </section>
@@ -200,11 +206,11 @@
       <section id="stage-deploy" class="stage hidden">
         <button class="back" data-stage="review" type="button">← Back to review</button>
         <div id="rail-deploy" class="rail"></div>
-        <h2>Deploy to Azure</h2>
+        <h2>Provision Azure infrastructure</h2>
         <p class="hint">
-          Runs a real ARM <strong>what-if</strong> preview first (always), then deploys
-          only after you review and confirm. What-if itself does not change app resources;
-          creating a missing prerequisite resource group is separately disclosed and confirmed.
+          Runs a real ARM <strong>what-if</strong> preview first (always), then creates
+          infrastructure only after you review and confirm. Compute uses Microsoft placeholder
+          images; this does not build, publish, configure, or run your application code.
         </p>
         <div class="deploy-controls">
           <label>
@@ -228,7 +234,7 @@
         <div class="deploy-actions">
           <button id="btn-whatif" class="btn" type="button" disabled>Run what-if</button>
           <button id="btn-apply" class="btn btn-danger" type="button" disabled>
-            Deploy (create resources)
+            Provision infrastructure
           </button>
         </div>
         <pre id="deploy-log" class="code log"></pre>
@@ -237,13 +243,18 @@
 
     <footer class="foot">
       <span
-        >Offline preview runs entirely in your browser. Deploy talks directly to Azure
-        Resource Manager; repo push talks directly to GitHub. Tokens are held only in
-        tab-scoped session storage and are cleared on sign-out or tab close.</span
+        >Offline analysis runs in your browser. Azure tokens stay in tab-scoped session
+        storage. GitHub tokens are held in memory after passing transiently through the
+        operator's OAuth exchange Worker; neither token is intentionally logged or stored
+        server-side. Repo access uses the scopes shown at GitHub consent. This preview has
+        no SLA; report problems in
+        <a href="https://github.com/stevenjma/intent-to-azure/issues" target="_blank" rel="noopener noreferrer"
+          >GitHub Issues</a
+        >.</span
       >
     </footer>
 
     <script src="./config.js?v=20260818a"></script>
-    <script type="module" src="./bootstrap.js?v=20260910b"></script>
+    <script type="module" src="./bootstrap.js?v=20260911a"></script>
   </body>
 </html>

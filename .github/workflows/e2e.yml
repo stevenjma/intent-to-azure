@@ -6,7 +6,7 @@
 #   analyzed    azx plan --json runs
 #   plan-match  intent.needs + plan.resources + region == test/e2e/expectations.json
 #   compile     `az bicep build` on the emitted template          (real compiler, NO Azure login/network)
-#   what-if     `az deployment group what-if` on an ephemeral RG   (only if BYO-Azure repo vars are set)
+#   what-if     `az deployment group what-if` in a validation RG    (only if BYO-Azure repo vars are set)
 #
 # Codegen status: the two azx codegen bugs this harness originally pinned as
 # expected FAILs — the CognitiveServices customSubDomainName BCP057 error and the
@@ -21,13 +21,17 @@
 #
 # By default this workflow makes ZERO real-Azure calls: only `az bicep build`
 # (a local compiler, no login/network) runs. The real-Azure what-if gate is
-# opt-in and DEFERRED to POC #2 — it stays SKIPPED unless BYO-Azure OIDC repo
-# *variables* are set. The shipped POC #1 what-if is the fully offline
+# opt-in — it stays SKIPPED unless BYO-Azure OIDC repo *variables* are set.
+# These use a separate E2E_AZURE_* identity so CI can never
+# overwrite the public browser application's AZURE_CLIENT_ID. The shipped POC #1
+# what-if is the fully offline
 # `azx what-if` CLI command, which never contacts Azure.
 #
-# BYO-Azure (optional, enables the what-if gate): run scripts/setup-azure-oidc.sh
-# (or .ps1) once to create a federated identity and set the three repo *variables*
-# AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID. No client secret is stored.
+# BYO-Azure (optional, enables the what-if gate on trusted main runs): run
+# scripts/setup-azure-oidc.sh (or .ps1) once to create a main-only federated
+# identity scoped to persistent validation resource groups and set the repo *variables*
+# E2E_AZURE_CLIENT_ID / E2E_AZURE_TENANT_ID / E2E_AZURE_SUBSCRIPTION_ID.
+# No client secret is stored.
 
 name: e2e
 
@@ -107,34 +111,38 @@ jobs:
       - name: Azure login (OIDC, optional)
         id: login
         if: >-
-          ${{ vars.AZURE_CLIENT_ID != '' &&
-              vars.AZURE_TENANT_ID != '' &&
-              vars.AZURE_SUBSCRIPTION_ID != '' &&
+          ${{ github.ref == 'refs/heads/main' &&
+              vars.E2E_AZURE_CLIENT_ID != '' &&
+              vars.E2E_AZURE_TENANT_ID != '' &&
+              vars.E2E_AZURE_SUBSCRIPTION_ID != '' &&
               steps.compile.outputs.compile == 'pass' }}
         uses: azure/login@8216e11d8cd9b42fe925c852af8e76311ff067ac # v2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ vars.E2E_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.E2E_AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.E2E_AZURE_SUBSCRIPTION_ID }}
 
-      - name: What-if gate (ephemeral RG)
+      - name: What-if gate (validation RG)
         id: whatif
         if: ${{ steps.login.outcome == 'success' }}
         run: |
-          RG="azx-e2e-$APP-${GITHUB_RUN_ID}"
+          RG="azx-e2e-$APP"
           echo "rg=$RG" >> "$GITHUB_OUTPUT"
-          az group create -n "$RG" -l "$REGION" --tags azx-e2e=1 ttl=2h >/dev/null
-          if az deployment group what-if -g "$RG" --template-file "main-$APP.bicep" --no-pretty-print > "whatif-$APP.txt" 2>&1; then
+          PARAM_ARGS=()
+          if grep -q "param postgresAdminPassword" "main-$APP.bicep"; then
+            PASSWORD="$(openssl rand -base64 32)"
+            printf '{"postgresAdminPassword":{"value":"%s"}}\n' "$PASSWORD" > "params-$APP.json"
+            unset PASSWORD
+            PARAM_ARGS=(--parameters "@params-$APP.json")
+          fi
+          if az deployment group what-if -g "$RG" --template-file "main-$APP.bicep" \
+            "${PARAM_ARGS[@]}" --no-pretty-print > "whatif-$APP.txt" 2>&1; then
             echo "whatif=pass" >> "$GITHUB_OUTPUT"
             echo "::notice title=what-if $APP::PASS"
           else
             echo "whatif=fail" >> "$GITHUB_OUTPUT"
             echo "::warning title=what-if $APP::FAIL"; sed -n '1,8p' "whatif-$APP.txt" || true
           fi
-
-      - name: Delete ephemeral RG
-        if: ${{ always() && steps.whatif.outputs.rg != '' }}
-        run: az group delete -n "${{ steps.whatif.outputs.rg }}" --yes --no-wait || true
 
       - name: Reconcile gates (assert)
         run: |

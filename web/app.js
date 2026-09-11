@@ -6,7 +6,7 @@
  * github.js. This file is glue + rendering only; it never persists tokens.
  */
 
-import { resolveScan, generateArmTemplate, planNeedsPgPassword } from "./engine/web-engine.js?v=20260910b";
+import { resolveScan, generateArmTemplate, planNeedsPgPassword } from "./engine/web-engine.js?v=20260911a";
 import {
   githubSignIn,
   githubSignOut,
@@ -17,8 +17,9 @@ import {
   fetchRepoFiles,
   createRepoAndPush,
   listAccessibleRepos,
+  orgGrantUrl,
   searchRepos,
-} from "./github.js?v=20260910b";
+} from "./github.js?v=20260911a";
 import {
   azureSignIn,
   azureSignOut,
@@ -29,7 +30,7 @@ import {
   ensureResourceGroup,
   whatIf,
   deploy,
-} from "./azure.js?v=20260910b";
+} from "./azure.js?v=20260911a";
 
 const cfg = window.AZX_CONFIG || {};
 const $ = (id) => document.getElementById(id);
@@ -507,7 +508,7 @@ function renderRepoError(status, err) {
     ),
   );
   const a = document.createElement("a");
-  a.href = r.grantUrl;
+  a.href = orgGrantUrl(r.org);
   a.target = "_blank";
   a.rel = "noopener noreferrer";
   a.textContent = `Grant this app access to ${r.org} ↗`;
@@ -813,7 +814,7 @@ async function onWhatIf() {
     for (const c of changes) {
       write(`  ${c.changeType || "?"}  ${c.resourceId || c.after?.id || ""}`);
     }
-    write("\nReview the predicted changes above, then click Deploy to apply.");
+    write("\nReview the predicted changes above, then click Provision infrastructure to apply.");
     if (inputRevision !== deployInputRevision) {
       throw new Error("Deployment inputs changed while what-if was running. Run what-if again.");
     }
@@ -841,7 +842,7 @@ async function onApply() {
   const count = current.plan.resources.length;
   const cost = current.plan.budget ? `~$${current.plan.budget.estimatedMonthlyUsd}/mo` : "unknown cost";
   const confirmed = window.confirm(
-    `Deploy ${count} resource(s) to:\n` +
+    `Provision ${count} infrastructure resource(s) in:\n` +
       `  subscription: ${subName}\n` +
       `  resource group: ${inputs.resourceGroup} (${inputs.region})\n` +
       `  estimated: ${cost}\n\n` +
@@ -852,7 +853,7 @@ async function onApply() {
     const { subscriptionId, resourceGroup, region } = inputs;
     const params = deployParameters();
     const template = generateArmTemplate(current.plan);
-    write("\n▶ Deploying (creating resources)…");
+    write("\n▶ Provisioning infrastructure resources…");
     await ensureResourceGroup(subscriptionId, resourceGroup, region);
     const final = await deploy(
       subscriptionId,
@@ -863,7 +864,8 @@ async function onApply() {
       { onLog: write },
     );
     const state = final?.properties?.provisioningState || "Unknown";
-    write(`\n✔ Deployment ${state}.`);
+    write(`\n✔ Infrastructure deployment ${state}.`);
+    write("  Compute uses Microsoft placeholder images; your application code has not been deployed.");
     const outputs = final?.properties?.outputs || {};
     for (const [k, v] of Object.entries(outputs)) write(`  output ${k} = ${v.value}`);
   } catch (err) {
@@ -906,7 +908,7 @@ async function onShip() {
         ),
       );
       const a = document.createElement("a");
-      a.href = r.grantUrl;
+      a.href = orgGrantUrl(r.org);
       a.target = "_blank";
       a.rel = "noopener noreferrer";
       a.textContent = `Grant this app access to ${r.org} ↗`;

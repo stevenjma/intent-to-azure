@@ -16,11 +16,17 @@ jobs:
         env:
           PAGE_URL: https://stevenjma.github.io/intent-to-azure/
           WORKER_URL: ${{ vars.GH_WORKER_URL }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           [ -n "$WORKER_URL" ] || { echo "::error::GH_WORKER_URL is unset"; exit 1; }
           curl --fail --silent --show-error --location --max-time 20 "$PAGE_URL" |
             grep -q "App Intent"
           curl --fail --silent --show-error --location --max-time 20 \
-            "${WORKER_URL%/}/health" |
-            grep -q '"status":"ok"'
+            "${PAGE_URL%/}/release.json" |
+            grep -q "\"sha\":\"$RELEASE_SHA\""
+          worker_health="$(curl --fail --silent --show-error --location --max-time 20 \
+            "${WORKER_URL%/}/health")"
+          jq -e '.status == "ok"' <<<"$worker_health" >/dev/null
+          jq -e '.deployment | type == "string" and length > 0 and . != "unknown"' \
+            <<<"$worker_health" >/dev/null
