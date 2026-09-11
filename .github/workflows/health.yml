@@ -20,11 +20,11 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$WORKER_URL" ] || { echo "::error::GH_WORKER_URL is unset"; exit 1; }
-          curl --fail --silent --show-error --location --max-time 20 "$PAGE_URL" |
-            grep -q "App Intent"
-          curl --fail --silent --show-error --location --max-time 20 \
-            "${PAGE_URL%/}/release.json" |
-            grep -q "\"sha\":\"$RELEASE_SHA\""
+          page_html="$(curl --fail --silent --show-error --location --max-time 20 "$PAGE_URL")"
+          grep -q "App Intent" <<<"$page_html"
+          release_json="$(curl --fail --silent --show-error --location --max-time 20 \
+            "${PAGE_URL%/}/release.json")"
+          jq -e --arg sha "$RELEASE_SHA" '.sha == $sha' <<<"$release_json" >/dev/null
           worker_health="$(curl --fail --silent --show-error --location --max-time 20 \
             "${WORKER_URL%/}/health")"
           jq -e '.status == "ok"' <<<"$worker_health" >/dev/null
