@@ -6,7 +6,6 @@
   --fg: #e6edf3;
   --muted: #8b949e;
   --accent: #2f81f7;
-  --azure: #0078d4;
   --github: #6e40c9;
   --danger: #da3633;
   --ok: #2ea043;
@@ -55,9 +54,7 @@ body {
 }
 .btn:hover:not(:disabled) { border-color: var(--accent); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-azure { border-color: var(--azure); }
 .btn-github { border-color: var(--github); }
-.btn-danger { border-color: var(--danger); color: #ffb4b0; }
 
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
 .dot[data-state="out"] { background: var(--muted); }
@@ -130,9 +127,7 @@ input[type="text"]:focus, select:focus { outline: none; border-color: var(--acce
 .deploy-controls label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
 .deploy-controls label.checkbox { flex-direction: row; align-items: center; gap: 7px; }
 .deploy-actions { display: flex; gap: 10px; margin-bottom: 14px; }
-.cli-handoff { margin: 16px 0; }
 .handoff-steps { margin: 4px 0 12px; padding-left: 22px; color: var(--muted); font-size: 13px; }
-.browser-deploy { margin-top: 18px; }
 
 .card {
   background: var(--panel);

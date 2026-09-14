@@ -1,12 +1,12 @@
 /**
- * app.js — SPA orchestration: auth buttons, repo analyze, render, deploy, ship.
+ * app.js — SPA orchestration: GitHub auth, repo analysis, rendering, and PR handoff.
  *
- * The engine (scan → intent → plan → bicep → scaffold → ARM template) runs entirely
- * in this page from ./engine/web-engine.js. Azure + GitHub I/O live in azure.js /
- * github.js. This file is glue + rendering only; it never persists tokens.
+ * The engine (scan → intent → plan → bicep → scaffold) runs entirely in this page.
+ * GitHub I/O lives in github.js. This file is glue + rendering only; it never
+ * persists tokens.
  */
 
-import { resolveScan, generateArmTemplate, planNeedsPgPassword } from "./engine/web-engine.js?v=20260911b";
+import { resolveScan } from "./engine/web-engine.js?v=20260914a";
 import {
   githubSignIn,
   githubSignOut,
@@ -19,45 +19,22 @@ import {
   listAccessibleRepos,
   orgGrantUrl,
   searchRepos,
-} from "./github.js?v=20260911b";
-import {
-  azureSignIn,
-  azureSignOut,
-  azureSignedIn,
-  restoreAzureSession,
-  listSubscriptions,
-  resourceGroupExists,
-  ensureResourceGroup,
-  whatIf,
-  deploy,
-} from "./azure.js?v=20260911b";
-import {
-  buildAzureCliScript,
-  deploymentScriptName,
-} from "./azure-cli-handoff.js?v=20260911b";
+} from "./github.js?v=20260914a";
 
 const cfg = window.AZX_CONFIG || {};
 const $ = (id) => document.getElementById(id);
 
 /** Current analysis result: { intent, plan, bicep, scaffold, appName, hosting }. */
 let current = null;
-/** True once a what-if has succeeded for the current deploy inputs (gates apply). */
-let whatIfOk = false;
-let deployInputRevision = 0;
-let approvedInputRevision = -1;
 let analysisSequence = 0;
 let analysisController = null;
 let confirmationApprovalSequence = -1;
-let lastDownloadedCliFilename = "";
 
-/** The linear stages. `codify`/`deploy` are the two "Act" spokes off `review`. */
-const STAGES = ["source", "review", "codify", "deploy"];
+const STAGES = ["source", "review", "codify"];
 /** The stage currently shown (exactly one `#stage-*` is visible at a time). */
 let currentStage = "source";
-/** Which act spoke the "Act" stepper item returns to (last one chosen). */
-let lastAct = "codify";
 /** Tracks fields the user has hand-edited so a re-analyze won't clobber them. */
-const dirty = { rg: false, region: false, ship: false };
+const dirty = { ship: false };
 
 // --------------------------------------------------------------------------
 // Setup / boot
@@ -67,7 +44,6 @@ export function boot(oauthResult = null) {
   // Name every required identifier so the setup banner can say exactly what's
   // missing (self-host forkers hit partial-config states otherwise — DR-010).
   const REQUIRED = [
-    ["azureClientId", "Entra SPA client ID (azureClientId)"],
     ["githubClientId", "GitHub OAuth App client ID (githubClientId)"],
     ["githubWorkerUrl", "token-exchange Worker URL (githubWorkerUrl)"],
   ];
@@ -81,50 +57,26 @@ export function boot(oauthResult = null) {
     banner.appendChild(list);
   }
 
-  $("btn-azure").addEventListener("click", onAzureAuth);
   $("btn-github").addEventListener("click", onGithubAuth);
   $("repo-form").addEventListener("submit", onAnalyze);
   $("repo-input").addEventListener("input", onRepoInput);
-  $("btn-whatif").addEventListener("click", onWhatIf);
-  $("btn-apply").addEventListener("click", onApply);
-  $("btn-download-cli").addEventListener("click", onDownloadAzureCli);
-  $("btn-copy-cli").addEventListener("click", onCopyAzureCliCommand);
   $("btn-ship").addEventListener("click", onShip);
   $("go-codify").addEventListener("click", () => goToStage("codify"));
-  $("go-deploy").addEventListener("click", () => goToStage("deploy"));
 
   // Stepper + back buttons: any element with data-stage navigates.
   for (const el of document.querySelectorAll("[data-stage]")) {
     el.addEventListener("click", () => goToStage(el.dataset.stage));
   }
 
-  // Deploy inputs: changing them invalidates a prior what-if and marks dirty.
-  for (const id of ["sub-select", "rg-input", "region-input", "pg-password"]) {
-    $(id).addEventListener("input", () => {
-      if (id === "rg-input") dirty.rg = true;
-      if (id === "region-input") dirty.region = true;
-      if (id === "rg-input" || id === "region-input") {
-        lastDownloadedCliFilename = "";
-        const status = $("cli-handoff-status");
-        status.className = "status";
-        status.textContent = "Deployment inputs changed; download a new script.";
-      }
-      deployInputRevision++;
-      setWhatIfOk(false);
-      updateAvailability();
-    });
-  }
   $("ship-repo-input").addEventListener("input", () => {
     dirty.ship = true;
   });
   $("confirm-assumptions").addEventListener("change", (event) => {
     confirmationApprovalSequence = event.target.checked ? analysisSequence : -1;
-    deployInputRevision++;
-    setWhatIfOk(false);
     updateAvailability();
   });
 
-  // Deep-link support: #review / #codify / #deploy on boot (guarded).
+  // Deep-link support: #review / #codify on boot (guarded).
   const hash = location.hash.replace(/^#/, "");
   if (STAGES.includes(hash)) currentStage = hash;
   render();
@@ -137,13 +89,12 @@ export function boot(oauthResult = null) {
 // Stage state machine
 // --------------------------------------------------------------------------
 
-/** Navigate to a stage. `act` resolves to the last-chosen spoke. Guards gate. */
+/** Navigate to a stage. `act` resolves to the single PR handoff. */
 function goToStage(stage) {
-  if (stage === "act") stage = lastAct;
+  if (stage === "act") stage = "codify";
   if (!STAGES.includes(stage)) return;
   // Every stage past source requires an analyzed repo.
   if (stage !== "source" && !current) return;
-  if (stage === "codify" || stage === "deploy") lastAct = stage;
   currentStage = stage;
   history.replaceState(null, "", `#${stage}`);
   render();
@@ -158,7 +109,7 @@ function render() {
 }
 
 function updateStepper() {
-  const group = currentStage === "codify" || currentStage === "deploy" ? "act" : currentStage;
+  const group = currentStage === "codify" ? "act" : currentStage;
   for (const item of document.querySelectorAll("#stepper .stepper-item")) {
     const s = item.dataset.stage;
     item.classList.toggle("active", s === group);
@@ -177,7 +128,6 @@ function updateRails() {
     `<span class="rail-sep">·</span>${esc(cost)}` +
     `<span class="rail-sep">·</span>${esc(p.region)}`;
   $("rail-codify").innerHTML = html;
-  $("rail-deploy").innerHTML = html;
 }
 
 function setDot(btnId, state) {
@@ -188,49 +138,8 @@ function setDot(btnId, state) {
 // Auth
 // --------------------------------------------------------------------------
 
-async function onAzureAuth() {
-  if (azureSignedIn()) {
-    try {
-      await azureSignOut();
-    } catch (err) {
-      console.warn("Azure provider sign-out did not complete:", err.message);
-    } finally {
-      setDot("btn-azure", "out");
-      $("btn-azure").lastChild.textContent = " Sign in with Azure";
-      $("sub-select").replaceChildren();
-      $("sub-select").disabled = true;
-      deployInputRevision++;
-      setWhatIfOk(false);
-      clearAuthNotice();
-      render();
-    }
-    return;
-  }
-  setDot("btn-azure", "pending");
-  try {
-    const acct = await azureSignIn(cfg);
-    applyAzureSignedIn(acct);
-    await populateSubscriptions();
-    render();
-  } catch (err) {
-    if (err?.redirecting) return; // navigating away to finish sign-in
-    setDot("btn-azure", "out");
-    renderAzureError(err);
-  }
-}
-
-/** Reflect a signed-in Azure account in the button + notice. */
-function applyAzureSignedIn(acct) {
-  setDot("btn-azure", "in");
-  $("btn-azure").lastChild.textContent = ` ${acct.username || "Signed in"}`;
-  clearAuthNotice();
-}
-
 /**
- * Restore prior sign-ins on page load. Handles redirect-flow returns for both
- * providers, then falls back to a saved tab session (GitHub) or MSAL's cached
- * account (Azure). Sets each button straight to its final state — no "pending"
- * flicker on loads where there's nothing to restore.
+ * Restore GitHub sign-in on page load from a redirect return or saved tab session.
  */
 async function restoreSessions(oauthResult) {
   try {
@@ -245,83 +154,7 @@ async function restoreSessions(oauthResult) {
     if (!err?.redirecting) console.warn("GitHub session restore:", err.message);
   }
 
-  try {
-    const acct = await restoreAzureSession(cfg);
-    if (acct) {
-      applyAzureSignedIn(acct);
-      await populateSubscriptions();
-    }
-  } catch (err) {
-    if (err?.redirecting) return; // navigating away for the next redirect leg
-    renderAzureError(err);
-  }
-
   render();
-}
-
-function clearAuthNotice() {
-  const el = $("auth-notice");
-  el.classList.add("hidden");
-  el.textContent = "";
-}
-
-/**
- * Render an Azure sign-in error into the auth-notice banner. When the tenant
- * gates the app behind admin approval (err.adminConsent), surface a one-click
- * admin-consent deep link instead of a dead-end alert. The URL is built by
- * azure.js from our own public client id + origin; nodes use the DOM API so no
- * user-controlled text is ever interpolated into HTML.
- */
-function renderAzureError(err) {
-  const el = $("auth-notice");
-  el.classList.remove("hidden");
-  el.textContent = "";
-  const ac = err.adminConsent;
-  if (err.needsAzureSignup) {
-    const strong = document.createElement("strong");
-    strong.textContent = "No Azure subscription on this account. ";
-    el.append(strong);
-    el.append(
-      document.createTextNode(
-        "This tool deploys to Azure, so you need an account that has an Azure subscription. Personal Microsoft accounts are welcome — create a free Azure account (it sets up your Azure directory), then sign in again: ",
-      ),
-    );
-    const a = document.createElement("a");
-    a.href = err.needsAzureSignup.signupUrl;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    a.textContent = "Create a free Azure account ↗";
-    el.append(a);
-    el.append(
-      document.createTextNode(
-        " Already have a subscription? Sign in and pick the organization/directory that holds it.",
-      ),
-    );
-    return;
-  }
-  if (!ac) {
-    el.textContent = `Azure sign-in failed: ${err.message}`;
-    return;
-  }
-  const strong = document.createElement("strong");
-  strong.textContent = "Admin approval needed. ";
-  el.append(strong);
-  el.append(
-    document.createTextNode(
-      "Your organization requires an administrator to approve this app before you can sign in. Send an admin this one-click approval link: ",
-    ),
-  );
-  const a = document.createElement("a");
-  a.href = ac.url;
-  a.target = "_blank";
-  a.rel = "noopener noreferrer";
-  a.textContent = "Grant admin consent for your tenant ↗";
-  el.append(a);
-  el.append(
-    document.createTextNode(
-      " An admin approves once for the whole tenant; after that, sign in again here.",
-    ),
-  );
 }
 
 async function onGithubAuth() {
@@ -420,8 +253,6 @@ async function onAnalyze(ev) {
   const sequence = ++analysisSequence;
   current = null;
   confirmationApprovalSequence = -1;
-  deployInputRevision++;
-  setWhatIfOk(false);
   if (currentStage !== "source") goToStage("source");
   else render();
   const status = $("repo-status");
@@ -444,7 +275,7 @@ async function onAnalyze(ev) {
     if (sequence !== analysisSequence) return;
     current = { ...result, appName: repo, owner, hosting: detectCurrentHosting(files) };
     renderReview(current);
-    resetActionState(owner, repo, result.plan);
+    resetActionState(owner, repo);
 
     status.className = "status ok";
     status.textContent = `Done — ${result.plan.resources.length} Azure resource(s) planned for “${repo}”.`;
@@ -457,28 +288,15 @@ async function onAnalyze(ev) {
 }
 
 /**
- * Re-prime action inputs for a freshly analyzed repo. Clears both logs, resets
- * the what-if gate, wipes the PG secret, and re-seeds rg/region/ship defaults —
- * but only for fields the user hasn't hand-edited (tracked via `dirty`). A new
- * analyze is a new plan, so we clear `dirty` first and let the plan re-seed.
+ * Re-prime the PR handoff for a freshly analyzed repo.
  */
-function resetActionState(owner, repo, plan) {
-  dirty.rg = dirty.region = dirty.ship = false;
-  $("deploy-log").textContent = "";
-  lastDownloadedCliFilename = "";
-  $("cli-handoff-status").textContent = "";
+function resetActionState(owner, repo) {
+  dirty.ship = false;
   $("ship-log").textContent = "";
-  const pg = $("pg-password");
-  if (pg) pg.value = "";
-  $("rg-input").value = `rg-${slug(repo)}`;
-  $("region-input").value = plan.region;
   // Default the new-repo name to the SOURCE repo's owner path, so an org-owned
   // app lands its infra in the same org (e.g. `my-org/app-infra`) rather than
   // silently under the signed-in personal account. Users can edit it.
   $("ship-repo-input").value = owner ? `${owner}/${slug(repo)}-infra` : `${slug(repo)}-infra`;
-  whatIfOk = false;
-  approvedInputRevision = -1;
-  deployInputRevision++;
 }
 
 /**
@@ -654,27 +472,8 @@ function renderScaffold(files) {
   }
 }
 
-// --------------------------------------------------------------------------
-// Deploy
-// --------------------------------------------------------------------------
-
-async function populateSubscriptions() {
-  const sel = $("sub-select");
-  sel.innerHTML = "";
-  const subs = await listSubscriptions();
-  for (const s of subs) {
-    const opt = document.createElement("option");
-    opt.value = s.subscriptionId;
-    opt.textContent = `${s.displayName} (${s.subscriptionId.slice(0, 8)}…)`;
-    sel.appendChild(opt);
-  }
-  sel.disabled = subs.length === 0;
-}
-
 /**
- * Central availability + reason engine. Computes disabled state and the
- * co-located "why" for both act spokes and the review chooser cards. Buttons
- * that navigate stay enabled; only terminal actions gate on auth/inputs.
+ * Central availability + reason engine for the PR handoff.
  */
 function updateAvailability() {
   const unresolved = unresolvedConfirmations();
@@ -690,38 +489,6 @@ function updateAvailability() {
   $("btn-ship").disabled = Boolean(codifyReason);
   setReason("codify-reason", codifyReason, "review");
   setReason("codify-reason-act", codifyReason, "act");
-
-  // Deploy path.
-  const subVal = $("sub-select").value;
-  const noSubs = azureSignedIn() && $("sub-select").options.length === 0;
-  const budgetBlocked = Boolean(current?.plan?.budget?.blocked);
-  let handoffReason = "";
-  if (!current) handoffReason = "Analyze a repo first.";
-  else if (budgetBlocked) handoffReason = "A guardrail blocks this plan's budget — deploy is disabled.";
-  else if (confirmationReason) handoffReason = confirmationReason;
-  setReason("deploy-reason", handoffReason, "review");
-  setReason("deploy-reason-act", handoffReason, "act");
-
-  let browserReason = "";
-  if (!current) browserReason = "Analyze a repo first.";
-  else if (!azureSignedIn()) browserReason = "Optional direct deployment requires Azure sign-in and may require tenant admin approval.";
-  else if (noSubs) browserReason = "Signed in, but no Azure subscriptions were found on this account.";
-  else if (!subVal) browserReason = "Pick a subscription.";
-  else if (budgetBlocked) browserReason = "A guardrail blocks this plan's budget — deploy is disabled.";
-  else if (confirmationReason) browserReason = confirmationReason;
-  setReason("browser-deploy-reason-act", browserReason, "act");
-
-  const canHandoff = Boolean(current) && !budgetBlocked && unresolved.length === 0;
-  $("btn-download-cli").disabled = !canHandoff;
-  $("btn-copy-cli").disabled = !canHandoff || !lastDownloadedCliFilename;
-  const canWhatIf =
-    Boolean(current) && azureSignedIn() && Boolean(subVal) && !budgetBlocked && unresolved.length === 0;
-  $("btn-whatif").disabled = !canWhatIf;
-  $("btn-apply").disabled = !canWhatIf || !whatIfOk;
-
-  // Show the PG password field only when the plan provisions Postgres.
-  const pgField = $("pg-field");
-  if (pgField) pgField.classList.toggle("hidden", !(current && planNeedsPgPassword(current.plan)));
 }
 
 function unresolvedConfirmations() {
@@ -764,197 +531,6 @@ function setReason(id, msg, scope) {
   }
 }
 
-function setWhatIfOk(ok) {
-  whatIfOk = ok;
-  approvedInputRevision = ok ? deployInputRevision : -1;
-  updateAvailability();
-}
-
-/** Collect deploy parameters, reading the masked PG password field once. */
-function deployParameters() {
-  const params = { location: $("region-input").value.trim() };
-  if (planNeedsPgPassword(current.plan)) {
-    const pw = $("pg-password").value;
-    if (!pw) throw new Error("Enter the PostgreSQL admin password (field above) to deploy this plan.");
-    params.postgresAdminPassword = pw;
-  }
-  return params;
-}
-
-function handoffInputs() {
-  const resourceGroup = $("rg-input").value.trim();
-  const region = $("region-input").value.trim();
-  if (!resourceGroup) throw new Error("Enter a resource group name.");
-  if (!region) throw new Error("Enter a region.");
-  return { resourceGroup, region };
-}
-
-function cliHandoffArtifact() {
-  requireResolvedConfirmations();
-  const { resourceGroup, region } = handoffInputs();
-  const filename = deploymentScriptName(current.appName);
-  const script = buildAzureCliScript({
-    bicep: current.bicep,
-    resourceGroup,
-    region,
-    needsPgPassword: planNeedsPgPassword(current.plan),
-  });
-  return { filename, script };
-}
-
-function onDownloadAzureCli() {
-  const status = $("cli-handoff-status");
-  try {
-    const { filename: baseFilename, script } = cliHandoffArtifact();
-    const filename = baseFilename.replace(/\.sh$/, `-${Date.now()}.sh`);
-    const url = URL.createObjectURL(new Blob([script], { type: "text/x-shellscript;charset=utf-8" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 0);
-    lastDownloadedCliFilename = filename;
-    updateAvailability();
-    status.className = "status ok";
-    status.textContent = `Downloaded ${filename}. Upload it to Azure Cloud Shell, review it, then run: bash ${filename}`;
-  } catch (err) {
-    status.className = "status err";
-    status.textContent = err.message;
-  }
-}
-
-async function onCopyAzureCliCommand() {
-  const status = $("cli-handoff-status");
-  try {
-    if (!lastDownloadedCliFilename) throw new Error("Download the deployment script first.");
-    await navigator.clipboard.writeText(`bash ${lastDownloadedCliFilename}`);
-    status.className = "status ok";
-    status.textContent = `Copied: bash ${lastDownloadedCliFilename}`;
-  } catch (err) {
-    status.className = "status err";
-    status.textContent = err.message;
-  }
-}
-
-function deployInputs() {
-  const subscriptionId = $("sub-select").value;
-  const resourceGroup = $("rg-input").value.trim();
-  const region = $("region-input").value.trim();
-  if (!subscriptionId) throw new Error("Pick a subscription.");
-  if (!resourceGroup) throw new Error("Enter a resource group name.");
-  if (!region) throw new Error("Enter a region.");
-  return { subscriptionId, resourceGroup, region };
-}
-
-function deploymentName() {
-  return `azx-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-}
-
-async function onWhatIf() {
-  const log = $("deploy-log");
-  log.textContent = "";
-  try {
-    requireResolvedConfirmations();
-    const inputRevision = deployInputRevision;
-    const { subscriptionId, resourceGroup, region } = deployInputs();
-    const params = deployParameters();
-    const template = generateArmTemplate(current.plan);
-
-    const write = (m) => (log.textContent += m + "\n");
-    const exists = await resourceGroupExists(subscriptionId, resourceGroup);
-    if (inputRevision !== deployInputRevision) {
-      throw new Error("Deployment inputs changed while preparing what-if. Run what-if again.");
-    }
-    if (!exists) {
-      const approved = window.confirm(
-        `ARM what-if requires resource group “${resourceGroup}” to exist.\n\n` +
-          `Create it in ${region} now? This is a real Azure change; no app resources are deployed yet.`,
-      );
-      if (!approved) {
-        write("Preview canceled; Azure was not changed.");
-        return;
-      }
-      write(`▶ Creating prerequisite resource group ${resourceGroup} (${region}) — real Azure change…`);
-      await ensureResourceGroup(subscriptionId, resourceGroup, region);
-      if (inputRevision !== deployInputRevision) {
-        throw new Error("Deployment inputs changed. The prerequisite group was created, but what-if was not run.");
-      }
-    }
-    write("▶ Running ARM what-if (no application resources changed)…");
-    const result = await whatIf(
-      subscriptionId,
-      resourceGroup,
-      deploymentName(),
-      template,
-      params,
-      { onLog: write },
-    );
-    const changes = result?.changes || result?.properties?.changes || [];
-    write(`\n✔ what-if complete — ${changes.length} predicted change(s):`);
-    for (const c of changes) {
-      write(`  ${c.changeType || "?"}  ${c.resourceId || c.after?.id || ""}`);
-    }
-    write("\nReview the predicted changes above, then click Provision infrastructure to apply.");
-    if (inputRevision !== deployInputRevision) {
-      throw new Error("Deployment inputs changed while what-if was running. Run what-if again.");
-    }
-    setWhatIfOk(true);
-  } catch (err) {
-    $("deploy-log").textContent += `\n✖ ${err.message}\n`;
-    setWhatIfOk(false);
-  }
-}
-
-async function onApply() {
-  if (!whatIfOk || approvedInputRevision !== deployInputRevision) return;
-  const log = $("deploy-log");
-  const write = (m) => (log.textContent += m + "\n");
-  let inputs;
-  try {
-    requireResolvedConfirmations();
-    inputs = deployInputs();
-  } catch (err) {
-    write(`\n✖ ${err.message}`);
-    return;
-  }
-  const sel = $("sub-select");
-  const subName = sel.options[sel.selectedIndex]?.textContent || inputs.subscriptionId;
-  const count = current.plan.resources.length;
-  const cost = current.plan.budget ? `~$${current.plan.budget.estimatedMonthlyUsd}/mo` : "unknown cost";
-  const confirmed = window.confirm(
-    `Provision ${count} infrastructure resource(s) in:\n` +
-      `  subscription: ${subName}\n` +
-      `  resource group: ${inputs.resourceGroup} (${inputs.region})\n` +
-      `  estimated: ${cost}\n\n` +
-      "This creates real Azure resources and will incur cost. Continue?",
-  );
-  if (!confirmed) return;
-  try {
-    const { subscriptionId, resourceGroup, region } = inputs;
-    const params = deployParameters();
-    const template = generateArmTemplate(current.plan);
-    write("\n▶ Provisioning infrastructure resources…");
-    await ensureResourceGroup(subscriptionId, resourceGroup, region);
-    const final = await deploy(
-      subscriptionId,
-      resourceGroup,
-      deploymentName(),
-      template,
-      params,
-      { onLog: write },
-    );
-    const state = final?.properties?.provisioningState || "Unknown";
-    write(`\n✔ Infrastructure deployment ${state}.`);
-    write("  Compute uses Microsoft placeholder images; your application code has not been deployed.");
-    const outputs = final?.properties?.outputs || {};
-    for (const [k, v] of Object.entries(outputs)) write(`  output ${k} = ${v.value}`);
-  } catch (err) {
-    write(`\n✖ ${err.message}`);
-  }
-}
-
 // --------------------------------------------------------------------------
 // Ship (codify as a repo)
 // --------------------------------------------------------------------------
@@ -978,9 +554,8 @@ async function onShip() {
     );
     write(`\n✔ Repo created: ${res.htmlUrl}`);
     write(`✔ Pull request opened: ${res.prUrl}`);
-    write(`\n  Review the PR, then merge to land the infra on ${res.base}.`);
-    write("  After merging: add AZURE_CLIENT_ID / TENANT_ID / SUBSCRIPTION_ID repo variables and");
-    write("  run setup-azure-oidc.sh so the committed pipeline can deploy via OIDC.");
+    write("\n  Nothing has deployed. Review and share the PR.");
+    write("  Follow its README to connect Azure once. Merge to run what-if; deploy later with a manual workflow run.");
   } catch (err) {
     const r = err.orgRestriction;
     if (r) {

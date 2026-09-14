@@ -1,189 +1,95 @@
 # azx web — App Intent → Azure, from your browser
 
-A static single-page app that runs the azx engine **in the browser**: point it at a
-GitHub repo, and it infers the Azure the app needs, previews the Bicep + ARM, and
-generates a **what-if-gated Azure CLI script** for deployment. The script runs in the
-user's existing Azure CLI or Cloud Shell session, so no third-party Entra consent is
-required. Direct browser provisioning remains available as an optional, admin-approved
-path.
+A static single-page app that runs the azx engine **in the browser**. Point it at a
+GitHub repo to infer the Azure infrastructure the app needs, review the plan and
+Bicep, then create a new infrastructure repo with a pull request.
 
-No binary install. The engine is the same TypeScript that powers the `azx` CLI,
-compiled to ES modules and served as static assets.
+The pull request is the hosted product's end state. The site does not request Azure
+credentials, open Azure Portal or Cloud Shell, or deploy resources. The generated
+repo contains the one-time Azure OIDC setup and a what-if-gated deployment workflow.
+
+## Customer flow
+
+1. Sign in with GitHub and analyze a repository.
+2. Resolve any low-confidence planning decisions.
+3. Review the generated plan, Bicep, and repo scaffold.
+4. Create the infrastructure repo and pull request.
+5. While the pull request is open, follow its README to run
+   `scripts/setup-azure-oidc.sh` once from the PR branch.
+6. Merge the pull request to run ARM what-if.
+7. Inspect the preview, then manually run the workflow for the real deployment.
+
+Nothing deploys merely because the pull request was created or merged. Until OIDC
+setup is complete, the workflow skips safely.
 
 ## How it works
 
+```text
+GitHub repo ──REST──▶ file map ──▶ scan → intent → plan → Bicep / scaffold (browser)
+GitHub      ◀──REST── create repo + push branch + open pull request      (OAuth Worker)
+Azure      ◀──OIDC── what-if → production approval → deployment       (generated repo)
 ```
-GitHub repo ──REST──▶ file map ──▶ scan → intent → plan → Bicep / ARM / scaffold (browser)
-Azure      ◀── az CLI script ── what-if → explicit approval → deployment         (primary)
-Azure      ◀── ARM REST ── what-if → deployment create                           (optional)
-GitHub     ◀── git-data ── create repo + push scaffold                           (OAuth Worker)
-```
 
-- **Azure (primary)**: a self-contained Bash script embeds the generated Bicep and runs
-  through the user's authenticated Azure CLI or Cloud Shell session.
-- **Azure (optional direct mode)**: `@azure/msal-browser` (PKCE) → ARM token → ARM
-  REST. Entra is SPA-native and ARM sends CORS. No secret or backend.
-- **GitHub**: OAuth needs one tiny [token-exchange Worker](./worker/README.md) (the
-  code→token step needs the client secret and is CORS-blocked). Everything else —
-  reading the repo, creating the repo, pushing the scaffold — is direct REST.
-- **Deploy safety**: the generated script always runs ARM **what-if** and requires the
-  user to type `deploy` before apply. Optional direct mode also keeps its Deploy button
-  disabled until a successful what-if has been reviewed.
+- **Browser analysis** uses the same TypeScript engine as the `azx` CLI, compiled
+  to static ES modules.
+- **GitHub** OAuth needs one small [token-exchange Worker](./worker/README.md)
+  because the code-to-token exchange requires the client secret. Reading the source
+  repo and creating the generated repo and PR use GitHub REST directly.
+- **Azure** access exists only in the generated repo. Its setup script creates a
+  federated identity, grants Contributor at the target resource-group scope, and
+  writes the required GitHub repository variables. No Azure client secret is stored.
 
-## Deployment model: hosted multi-tenant
+## Operator setup
 
-azx runs as **one hosted instance** that many customers use directly. Browser analysis
-and the primary Azure CLI handoff require no azx Entra consent: Azure authentication
-stays in the user's existing first-party CLI or Cloud Shell session.
+1. Enable GitHub Pages with **GitHub Actions** as the source.
+2. Deploy the token-exchange [Worker](./worker/README.md), with `ALLOWED_ORIGIN`
+   set to the Pages origin and the GitHub OAuth client secret stored as a Worker
+   secret.
+3. Create a GitHub OAuth App whose callback URL is the Worker's `/callback`.
+4. Set repository Actions variables:
+   - `GH_OAUTH_CLIENT_ID`
+   - `GH_WORKER_URL`
+   - `GH_SCOPES` (optional; default `repo workflow read:user`)
+5. Push to `main`. [`pages.yml`](../.github/workflows/pages.yml) builds the engine
+   and generates `web/config.js`.
 
-The hosted Entra SPA is used only for optional direct browser provisioning. Customers
-from locked-down tenants can hit an admin-consent wall there even though azx requests
-only delegated ARM `user_impersonation`. The app detects that failure and provides an
-admin-consent link, but this is not the default deployment path.
+If required configuration is missing, the site names the missing values in a setup
+banner rather than failing after a customer begins the flow.
 
-## Operator setup checklist
+## Local development
 
-Do these once, in order. All the IDs below are **public** (safe in the browser); the
-only secret is the GitHub OAuth **client secret**, which lives only in the Worker.
-
-1. **Enable Pages**: Settings → Pages → Source = **GitHub Actions**. Note your Pages
-   URL: `https://<you>.github.io/<repo>/`.
-2. **Register an Entra SPA app** (Azure portal → App registrations):
-   - Platform **Single-page application**, Redirect URI = your exact Pages URL.
-   - **Supported account types = multitenant** (add personal accounts too for the
-     widest reach → `signInAudience` `AzureADandPersonalMicrosoftAccount`, which
-     requires the app's access-token version = 2).
-   - API permissions → delegated **Azure Service Management / user_impersonation**.
-   - Copy the **Application (client) ID** → `AZURE_CLIENT_ID`.
-3. **Create a GitHub OAuth App** (Settings → Developer settings → OAuth Apps):
-   - Authorization callback URL = your Worker's `/callback` (from step 4).
-   - Copy the **client ID** → `GH_OAUTH_CLIENT_ID`; keep the **client secret** for step 4.
-4. **Deploy the token-exchange [Worker](./worker/README.md)** with `ALLOWED_ORIGIN` =
-   your Pages origin and the GitHub client secret as a `wrangler secret`. Note its base
-   URL → `GH_WORKER_URL`. `ALLOW_SIGNUP` defaults to `true` (new GitHub users can sign
-   up mid-flow); set `false` for a closed audience. A custom domain works with no CSP change.
-5. **Set repo Actions Variables** (Settings → Secrets and variables → Actions →
-   **Variables**): `AZURE_CLIENT_ID`, `GH_OAUTH_CLIENT_ID`, `GH_WORKER_URL`, and
-   optionally `AZURE_TENANT` (default `common` — admits any work/school **or** personal
-   account) and `GH_SCOPES` (default `repo workflow read:user`). Push to `main` —
-   [`pages.yml`](../.github/workflows/pages.yml) builds the engine and generates
-   `web/config.js` from these Variables.
-6. **(Recommended) Complete Publisher Verification** to drop the "unverified" banner —
-   see [Publisher Verification](#publisher-verification-optional-but-recommended).
-
-If any Variable is missing the site shows a **setup banner naming exactly what's
-unset**, so partial configs fail loudly rather than at click time.
-
-## Configure (reference)
-
-`web/config.js` (gitignored) is generated in CI, or you can copy `config.example.js`
-locally and fill in:
-
-| Value | What it is |
-|---|---|
-| `azureClientId` | Entra SPA app **client ID** (your tenant). Redirect URI = your Pages URL. |
-| `azureTenant` | `common` (default) / `organizations` / your tenant GUID. |
-| `githubClientId` | Your **GitHub OAuth App** client ID. Callback = the Worker's `/callback`. |
-| `githubWorkerUrl` | Base URL of your deployed token-exchange Worker. |
-| `githubScopes` | OAuth scopes (default `repo workflow read:user`). Canonical value is guarded by `test/oauth-scopes-consistent.test.ts`. |
-
-## Run locally
+Copy `config.example.js` to `config.js`, fill in the GitHub values, then:
 
 ```bash
-npm run build:web           # tsc + copy node-free engine modules into web/engine/
-npx http-server web -p 8080 # or: python -m http.server 8080 --directory web
-# open http://localhost:8080
+npm run build:web
+npx http-server web -p 8080
 ```
 
-The offline preview and Azure CLI handoff work with no authentication config. GitHub
-sign-in needs `config.js` + the Worker; optional direct Azure provisioning additionally
-needs an Entra SPA redirect URI registered for `http://localhost:8080`.
+Open `http://localhost:8080`. The OAuth App and Worker must allow that application
+URL for GitHub sign-in.
 
-## Security / threat model
+## Security model
 
-The browser threat model is the **inverse** of the CLI's. The page may hold a live
-**GitHub token** and, only in optional direct mode, an **ARM token**, so **XSS is the
-crown-jewel risk**. Mitigations:
+The page may hold a live GitHub token, so XSS is the primary browser risk.
 
-- **Strict CSP** (in `index.html`): `default-src 'none'`, no inline scripts, scripts
-  only from `self` + `esm.sh` (MSAL), `connect-src` pinned to Azure ARM + the GitHub
-  API + esm.sh. The Worker isn't in `connect-src` because the SPA reaches it through
-  a top-level OAuth redirect.
-- **GitHub tokens are memory-only.** A local bootstrap validates OAuth state and strips
-  the token fragment before loading the app or MSAL. Reloading therefore requires a
-  fresh GitHub sign-in. MSAL keeps its own Azure session in tab-scoped
-  `sessionStorage` so Entra redirect flows can complete.
-- **OAuth token delivery is application-path-pinned**: the Worker accepts redirect
-  state only for the exact configured application origin and path, then returns the
-  token in a URL fragment. Popup `postMessage` delivery is intentionally disabled
-  because GitHub Pages project sites under one account share an origin.
-- The engine treats the scanned repo as **untrusted data** (same validation as the
-  CLI): the ledger/scaffold regexes and `isDeployLedger` guard run unchanged in-browser.
+- The CSP allows scripts only from `self`; Azure/MSAL and ARM endpoints are not in
+  the hosted runtime surface.
+- The GitHub token is memory-only. Bootstrap validates OAuth state and removes the
+  URL fragment before loading application modules, so reload requires sign-in again.
+- OAuth return URLs are pinned to the exact configured application origin and path.
+- Source repositories are untrusted input; the engine retains its validation and
+  deployment-confirmation guards in-browser.
+- The Worker sees the GitHub token only during exchange and must not store, log, or
+  forward it. Its client secret stays in Worker secret storage.
 
-#### Clickjacking headers
+### Clickjacking headers
 
-The meta CSP in `index.html` meaningfully restricts scripts, connections, objects, and
-forms, but **cannot enforce `frame-ancestors`**. GitHub Pages does not provide a way for
-this repository to set response headers, so the hosted Pages deployment does not claim
-clickjacking protection. If the static files are served from a configurable host or CDN,
-set this HTTP response header on every HTML response:
+The meta CSP in `index.html` cannot enforce `frame-ancestors`. GitHub Pages cannot
+set repository-defined response headers. On a configurable host, set:
 
 ```text
-Content-Security-Policy: default-src 'none'; script-src 'self' https://esm.sh; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://login.microsoftonline.com https://management.azure.com https://api.github.com https://github.com https://esm.sh; frame-src https://login.microsoftonline.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; upgrade-insecure-requests
+Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://api.github.com https://github.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; upgrade-insecure-requests
 ```
 
-`X-Frame-Options: DENY` is also appropriate as a legacy fallback. These must be real HTTP
+`X-Frame-Options: DENY` is an appropriate legacy fallback. These must be real HTTP
 headers; adding either directive to a meta tag does not protect against framing.
-
-### Left to CI on purpose
-
-The OIDC **bootstrap** (`az ad app create` + role assignment) is *not* in the browser —
-it needs privileged Microsoft Graph consent. The pushed repo's `setup-azure-oidc.sh`
-handles it, exactly as the CLI flow documents.
-
-### Worker trust contract
-
-In hosted mode the operator's Worker is the **one** server-side component every
-customer's GitHub `code`→token exchange passes through. What this does and does not mean:
-
-- The Worker sees each customer's GitHub token **transiently**, only long enough to
-  `postMessage` it to that customer's tab at `ALLOWED_ORIGIN`. It does not store tokens,
-  log them, or forward them anywhere else. Keep it that way — do not add logging that
-  captures the token or the exchange response body.
-- The Worker never sees **Azure** tokens: MSAL runs entirely in the customer's browser
-  against Entra + ARM (both CORS-enabled), so ARM credentials never touch the operator.
-- The GitHub OAuth **client secret** lives only as a `wrangler secret` in the Worker;
-  it is never in the SPA, the repo, or `config.js`.
-- `ALLOWED_ORIGIN` is the trust anchor for token delivery — it must be the exact Pages
-  origin and nothing wildcard. This is a boundary, not a knob: do not loosen it.
-
-Customers are trusting the operator to run this Worker honestly. That's the price of a
-zero-config hosted experience; a customer who prefers zero third-party trust can still
-fork and run their own instance.
-
-### Secret rotation
-
-- **GitHub OAuth client secret**: rotate in the OAuth App (Developer settings → OAuth
-  Apps → Generate a new client secret), then `wrangler secret put GITHUB_CLIENT_SECRET`
-  and redeploy the Worker. Old in-flight logins fail closed; users just retry. Revoke
-  the old secret once the new one is live.
-- **Compromise response**: revoke the OAuth client secret immediately (invalidates the
-  exchange path for everyone), rotate as above. Entra has no secret in this flow (SPA +
-  PKCE), so there's nothing to rotate on the Azure side.
-
-## Publisher Verification (optional but recommended)
-
-Publisher Verification adds the blue "verified" badge to the optional direct mode's
-Entra consent screen and lets more tenants self-consent. It is not required for browser
-analysis or the primary Azure CLI handoff.
-
-To complete it later:
-
-1. Enroll in the **Microsoft AI Cloud Partner Program** (formerly MPN) in Partner
-   Center and note your **Partner (MPN) ID**.
-2. Verify a **branded domain** you own in the partner account.
-3. In Entra → App registrations → your app → **Branding & properties**, set the
-   **Publisher domain** to a verified domain, then **Add MPN ID to verify publisher**.
-
-Until then, gated tenants should use the Azure CLI handoff; an admin-consent link remains
-available for organizations that choose to approve direct mode.

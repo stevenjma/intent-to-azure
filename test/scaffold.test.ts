@@ -72,7 +72,9 @@ test("deploy.yml is valid YAML with what-if gate then real deploy", () => {
   // so the first push doesn't red-X before setup-azure-oidc.sh has run.
   assert.match(String(doc.jobs["what-if"].if), /AZURE_CLIENT_ID/);
   assert.match(String(doc.jobs.deploy.if), /AZURE_CLIENT_ID/);
-  // The real deploy is gated behind an approvable environment.
+  assert.match(String(doc.jobs["what-if"].if), /repository\.default_branch/);
+  assert.match(String(doc.jobs.deploy.if), /workflow_dispatch/);
+  // The real deploy is manual and retains an environment for optional protection.
   assert.equal(doc.jobs.deploy.environment, "production");
   // The real deploy actually creates resources.
   const deployRun = JSON.stringify(doc.jobs.deploy.steps);
@@ -145,10 +147,11 @@ test("scaffold ships a repo-parameterized OIDC setup script", () => {
   const files = buildScaffold(intent, plan, bicep);
   const script = files.find((f) => f.path === "scripts/setup-azure-oidc.sh");
   assert.ok(script, "expected scripts/setup-azure-oidc.sh to be shipped");
-  // It must federate the exact two subjects deploy.yml authenticates as.
+  // It must discover and federate the actual default branch.
   assert.ok(
-    script!.content.includes("${SUB_CLAIM_PREFIX}:ref:refs/heads/main"),
-    "federates main branch",
+    script!.content.includes(".defaultBranchRef.name") &&
+      script!.content.includes("${SUB_CLAIM_PREFIX}:ref:refs/heads/${DEFAULT_BRANCH}"),
+    "federates the actual default branch",
   );
   assert.ok(
     script!.content.includes("${SUB_CLAIM_PREFIX}:environment:production"),

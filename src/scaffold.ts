@@ -116,7 +116,7 @@ export function buildScaffold(
 /**
  * The CI/CD pipeline. Two jobs:
  *   what-if  — OIDC login → ensure RG → `az deployment group what-if` (the gate)
- *   deploy   — needs: what-if, behind a `production` environment (approval gate)
+ *   deploy   — manual dispatch only, needs: what-if, behind `production`
  *              → the REAL `az deployment group create`
  *
  * Auth is GitHub OIDC federation: the three repo *variables* (not secrets)
@@ -135,7 +135,10 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
   // Skip the whole run until OIDC is provisioned (AZURE_CLIENT_ID variable set by
   // scripts/setup-azure-oidc.sh). Without this, the first push — which lands before
   // OIDC can exist — fails `azure/login` and greets the user with a red-X run.
-  const oidcGuard = "    if: ${{ vars.AZURE_CLIENT_ID != '' }}";
+  const whatIfGuard =
+    "    if: ${{ vars.AZURE_CLIENT_ID != '' && github.ref_name == github.event.repository.default_branch }}";
+  const deployGuard =
+    "    if: ${{ vars.AZURE_CLIENT_ID != '' && github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch }}";
   // The @secure() Postgres password is written to a params file via `jq` (keeps it
   // off argv and immune to shell word-splitting), then referenced with @-file.
   const paramsStep = needsPgPassword
@@ -192,23 +195,21 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "#",
     "#   what-if  runs `az deployment group what-if` to preview the change set.",
     "#            `deploy` needs it, so a failed what-if blocks the deploy.",
-    "#   deploy   waits on the `production` environment (add required reviewers in",
-    "#            repo Settings -> Environments to gate the real deploy on approval),",
-    "#            then runs the REAL `az deployment group create`.",
+    "#   deploy   runs only on explicit workflow_dispatch, after what-if, then waits",
+    "#            on the `production` environment before the real create.",
     "#",
     "# The resource group is pre-created by scripts/setup-azure-oidc.sh and the OIDC",
     "# principal is scoped Contributor to THAT resource group only (not the whole",
     "# subscription), so neither job creates or manages resource groups.",
     "#",
-    "# Both jobs are guarded on the AZURE_CLIENT_ID variable, so runs cleanly SKIP until",
-    "# scripts/setup-azure-oidc.sh has provisioned OIDC — the first push won't red-X.",
+    "# Jobs are guarded on AZURE_CLIENT_ID and the repository's actual default branch.",
+    "# Pushes run preview only; real deployment always requires a manual workflow run.",
     ...pgNote,
     "",
     "name: deploy",
     "",
     "on:",
     "  push:",
-    "    branches: [main]",
     "    paths:",
     "      - infra/**",
     "      - .github/workflows/deploy.yml",
@@ -228,7 +229,7 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "",
     "jobs:",
     "  what-if:",
-    oidcGuard,
+    whatIfGuard,
     "    runs-on: ubuntu-latest",
     "    steps:",
     "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4",
@@ -242,9 +243,9 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "",
     "  deploy:",
     "    needs: what-if",
-    oidcGuard,
+    deployGuard,
     "    runs-on: ubuntu-latest",
-    "    environment: production   # add required reviewers here to gate the real deploy",
+    "    environment: production",
     "    steps:",
     "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4",
     "",
@@ -278,7 +279,7 @@ function readme(
 
   const secretStep = needsPgPassword
     ? [
-        "3. Add a repository **secret** `PG_ADMIN_PASSWORD` (Settings → Secrets and",
+        "- **PostgreSQL only:** add repository secret `PG_ADMIN_PASSWORD` (Settings → Secrets and",
         "   variables → Actions) — the PostgreSQL admin password for the real deploy.",
       ]
     : [];
@@ -329,46 +330,38 @@ function readme(
     "",
     cost,
     "",
-    "## How the pipeline deploys",
+    "## Handoff: review, connect Azure, deploy",
     "",
-    "`.github/workflows/deploy.yml` runs on every push to `main` (and manual",
-    "dispatch). It authenticates to Azure with **GitHub OIDC** — no client secret",
-    "is stored — then:",
+    "Creating this repo did **not** deploy anything to Azure. Use this sequence:",
     "",
-    "1. **what-if** — previews the change set (`az deployment group what-if`).",
-    "2. **deploy** — waits on the `production` environment (add required reviewers",
-    "   to gate on approval), then runs the real `az deployment group create`.",
-    "",
-    "## One-time setup",
-    "",
-    "> Until you finish this setup, `deploy.yml` **skips** every run (it's guarded on",
-    "> `AZURE_CLIENT_ID`), so the initial push won't produce a failed workflow run.",
-    "",
-    "1. From this repo (after it exists on GitHub and you have `az login` + `gh auth",
-    "   login`), provision the federated identity + repo variables:",
+    "1. Review the generated infrastructure pull request. Do not merge it yet.",
+    "2. Clone this repo, check out the PR's `azx-infra` branch, then authenticate",
+    "   with `az login` and `gh auth login`.",
+    "3. While the PR is open, run the one-time setup:",
     "",
     "   ```bash",
     "   ./scripts/setup-azure-oidc.sh        # bash; on Windows use WSL, Git Bash, or Cloud Shell",
     "   ```",
     "",
-    "   It refuses to silently reuse an Entra app that already matches the display",
-    "   name (reusing one can inherit stale credentials/roles). To reuse an app on",
-    "   purpose pass `--app-id <appId>`; to force a fresh app pass `--name <uniqueName>`.",
-    "",
-    "   It federates this repo's `main` branch and `production` environment to a new",
-    "   Entra app, **pre-creates the resource group** and grants the app Contributor",
-    "   **scoped to that resource group only** (not the whole subscription), and sets",
-    "   the repo **variables** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,",
-    "   `AZURE_SUBSCRIPTION_ID` (not secrets — deleting the app fully revokes access).",
-    "2. (Recommended) In Settings → Environments, add required reviewers to",
+    "   The script creates the federated identity, pre-creates the resource group,",
+    "   grants Contributor at that resource-group scope only, and automatically sets",
+    "   `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` as repo",
+    "   variables. It stores no Azure client secret.",
+    "4. (Recommended) In Settings → Environments, add required reviewers to",
     "   `production` so the real deploy waits on a human approval.",
-    "3. (Recommended) Protect `main` (require PR review / restrict pushes). The what-if",
+    "5. (Recommended) Protect the default branch (require PR review / restrict pushes). The what-if",
     "   job needs deploy-equivalent rights, so branch protection is the compensating",
     "   control that keeps the `main` credential from acting inside this resource group",
     "   without review.",
     ...secretStep,
     "",
-    "Then push to `main` — or run the workflow manually — to deploy.",
+    "6. Merge the PR. The merge runs ARM **what-if** only; inspect that workflow run.",
+    "7. When the preview is acceptable, manually run the `deploy` workflow on the",
+    "   default branch. It repeats what-if, then performs the real deployment.",
+    "",
+    "> Until setup is complete, `deploy.yml` skips safely because `AZURE_CLIENT_ID`",
+    "> is absent. Later infrastructure changes on `main` trigger the same what-if and",
+    "> preview automatically. Real deployment always requires a manual workflow run.",
     "",
     "---",
     "",
@@ -380,7 +373,7 @@ function readme(
 /**
  * A self-contained, repo-parameterized OIDC bootstrap shipped INTO the generated
  * repo. Unlike azx's own dev-repo e2e script, this federates the exact two subjects
- * the generated `deploy.yml` authenticates as — `ref:refs/heads/main` (what-if job)
+ * the generated `deploy.yml` authenticates as — the repo's default branch (what-if job)
  * and `environment:production` (deploy job) — for whichever repo it is run inside.
  */
 function oidcSetupScript(rg: string, region: string, subscriptionId?: string): string {
@@ -394,7 +387,7 @@ function oidcSetupScript(rg: string, region: string, subscriptionId?: string): s
     "# clone of THIS repo, after `az login` and `gh auth login`.",
     "#",
     "# It creates an Entra app + service principal, federates it to this repo's",
-    "# `main` branch and `production` environment (the two subjects deploy.yml uses),",
+    "# default branch and `production` environment (the two subjects deploy.yml uses),",
     "# pre-creates the target resource group as YOU (the human running this), and",
     "# grants the principal Contributor scoped to THAT resource group only — not the",
     "# whole subscription. It then sets the repo VARIABLES the workflow reads:",
@@ -402,9 +395,9 @@ function oidcSetupScript(rg: string, region: string, subscriptionId?: string): s
     "#",
     "# Security note: `az deployment group what-if` needs deploy-equivalent rights, so",
     "# the what-if and deploy jobs share one RG-scoped principal. The `production`",
-    "# environment approval gates the real create, but a change to the `main` workflow",
+    "# manual workflow dispatch gates the real create, but a change to the default-branch workflow",
     "# could still act within this ONE resource group using the branch credential.",
-    "# Protect `main` (require PR review / restrict who can push) as the compensating",
+    "# Protect the default branch (require PR review / restrict who can push) as the compensating",
     "# control, and keep this repo's resource group dedicated to this app.",
     "#",
     "# Requirements: az CLI (logged in), gh CLI (logged in), permission to create app",
@@ -431,6 +424,8 @@ function oidcSetupScript(rg: string, region: string, subscriptionId?: string): s
     "done",
     "",
     'REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"',
+    'DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)"',
+    '[[ -n "$DEFAULT_BRANCH" ]] || { echo "GitHub returned no default branch" >&2; exit 1; }',
     'OIDC_USE_DEFAULT="$(gh api "repos/${REPO}/actions/oidc/customization/sub" --jq .use_default)"',
     '[[ "$OIDC_USE_DEFAULT" == "true" ]] || { echo "custom GitHub OIDC subject templates are not supported" >&2; exit 1; }',
     'SUB_CLAIM_PREFIX="$(gh api "repos/${REPO}/actions/oidc/customization/sub" --jq .sub_claim_prefix)"',
@@ -445,7 +440,7 @@ function oidcSetupScript(rg: string, region: string, subscriptionId?: string): s
     'ISSUER="https://token.actions.githubusercontent.com"',
     'AUD="api://AzureADTokenExchange"',
     "",
-    'echo "repo=$REPO  subscription=$SUBSCRIPTION  tenant=$TENANT  rg=$RESOURCE_GROUP  app=$APP_NAME"',
+    'echo "repo=$REPO  branch=$DEFAULT_BRANCH  subscription=$SUBSCRIPTION  tenant=$TENANT  rg=$RESOURCE_GROUP  app=$APP_NAME"',
     "",
     "# App registration + service principal.",
     "# Reusing an existing Entra app can silently inherit whatever roles/credentials it",
@@ -485,7 +480,7 @@ function oidcSetupScript(rg: string, region: string, subscriptionId?: string): s
     "    exit 1",
     "  fi",
     "}",
-    'add_fic "gh-main"       "${SUB_CLAIM_PREFIX}:ref:refs/heads/main"',
+    'add_fic "gh-default"    "${SUB_CLAIM_PREFIX}:ref:refs/heads/${DEFAULT_BRANCH}"',
     'add_fic "gh-production" "${SUB_CLAIM_PREFIX}:environment:production"',
     "",
     "# Pre-create the resource group as YOU (full rights), so the pipeline principal can",
@@ -522,7 +517,8 @@ function oidcSetupScript(rg: string, region: string, subscriptionId?: string): s
     'gh variable set AZURE_SUBSCRIPTION_ID -b "$SUBSCRIPTION"',
     "",
     'echo',
-    'echo "Done. Push to main (or run the workflow) to deploy. Revoke with: az ad app delete --id $APP_ID"',
+    'echo "Done. Return to the open PR and merge it to run what-if. Deploy later with a manual workflow run."',
+    'echo "Revoke with: az ad app delete --id $APP_ID"',
     "",
   ].join("\n");
 }

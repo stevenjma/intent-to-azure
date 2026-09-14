@@ -545,21 +545,19 @@ SPEC.md         human-readable contract spec
 
 ## Compatibility & known limitations
 
-The hosted browser app ([`web/`](./web/README.md)) is a **proof of concept**. Its
-primary deployment path downloads a reviewable script that runs through the user's
-existing Azure CLI or Cloud Shell session. It does not request an azx Entra token, so
-enterprise user-consent policy does not block it.
+The hosted browser app ([`web/`](./web/README.md)) is a **proof of concept** for
+analysis and codification. Its sole hosted outcome is a reviewable infrastructure
+pull request. The site does not request Azure credentials or deploy resources.
 
-Direct browser provisioning is optional. It requests delegated Azure Resource Manager
-`user_impersonation`; tenants that restrict consent to verified publishers or disable
-user consent may require one-time admin approval. See
-[web/README](./web/README.md#deployment-model-hosted-multi-tenant).
+The generated repo contains a GitHub Actions OIDC pipeline and exact one-time setup
+instructions. After an operator connects that repo to Azure, the pipeline runs ARM
+what-if and waits on the `production` environment before deployment.
 
 **Other deployment paths:**
 
 - **The CLI** (below) — runs fully offline; `up --local-deploy` deploys through the
   user's own `az` login.
-- **The codified pipeline** — `ship --create-repo` (or the browser's "codify" path)
+- **The codified pipeline** — `ship --create-repo` (or the browser handoff)
   creates a repo whose GitHub Actions **OIDC** pipeline deploys under a per-tenant
   service principal your admin sets up once. No interactive ARM consent needed.
 

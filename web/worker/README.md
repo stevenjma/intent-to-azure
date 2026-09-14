@@ -4,7 +4,7 @@ The SPA is otherwise 100% static. This ~90-line Cloudflare Worker does the **one
 step a static page cannot: exchange a GitHub OAuth `code` for a user access token
 (the GitHub token endpoint needs the client *secret* and is not CORS-accessible).
 
-Azure needs **no** worker — Entra + ARM are SPA-native (MSAL PKCE, no secret).
+Azure is not accessed by the hosted SPA; deployment continues from the generated repo.
 
 ## What it does
 
