@@ -134,8 +134,8 @@ That creates a main-branch-only federated Entra app and four persistent, empty
 validation resource groups. The app receives Contributor only on those groups—not
 the subscription—and the setup writes three repo **variables**
 (`E2E_AZURE_CLIENT_ID`, `E2E_AZURE_TENANT_ID`, `E2E_AZURE_SUBSCRIPTION_ID`). These
-are deliberately separate from the hosted SPA's `AZURE_CLIENT_ID`. Pull-request jobs
-compile and plan offline but cannot obtain Azure credentials. Revoke anytime with
+are deliberately scoped to E2E validation. Pull-request jobs compile and plan offline
+but cannot obtain Azure credentials. Revoke anytime with
 `az ad app delete --id <appId>`.
 
 The scripts refuse to reuse an app by display name because Entra display names are

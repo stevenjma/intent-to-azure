@@ -4,28 +4,24 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!--
-      Strict CSP. The SPA holds live ARM + GitHub tokens in memory, so XSS is the
+      Strict CSP. The SPA holds a live GitHub token in memory, so XSS is the
       crown-jewel risk (the shell/argv threats from the CLI don't exist in a browser).
-      No inline scripts (all logic is external ES modules); scripts only from self +
-      esm.sh (MSAL). connect-src is pinned to the only origins the SPA actually fetches
-      (Azure ARM + GitHub API + esm.sh). The token-exchange Worker is NOT fetched — it's
+      No inline scripts (all logic is external ES modules); scripts load only from self.
+      connect-src is pinned to the GitHub origins the SPA actually fetches. The Worker is
+      not fetched — it is
       reached via window.open + postMessage — so a custom-domain Worker needs no CSP edit.
     -->
     <meta
       http-equiv="Content-Security-Policy"
       content="
         default-src 'none';
-        script-src 'self' https://esm.sh;
+        script-src 'self';
         style-src 'self';
         img-src 'self' data:;
         font-src 'self';
         connect-src 'self'
-          https://login.microsoftonline.com
-          https://management.azure.com
           https://api.github.com
-          https://github.com
-          https://esm.sh;
-        frame-src https://login.microsoftonline.com;
+          https://github.com;
         object-src 'none';
         upgrade-insecure-requests;
         base-uri 'none';
@@ -50,19 +46,17 @@
 
     <main>
       <section class="banner">
-        <strong>Public preview.</strong> azx plans and provisions Azure infrastructure; it
-        does not build or deploy your application code. Use a test subscription and review
-        every ARM what-if before creating resources.
+        <strong>Public preview.</strong> azx analyzes your app and creates a reviewable
+        infrastructure pull request. It does not deploy Azure resources or application code
+        from this site.
       </section>
 
       <section id="setup-banner" class="banner hidden">
         <strong>Setup needed.</strong> Copy <code>web/config.example.js</code> to
-        <code>web/config.js</code> and fill in your Entra SPA client ID, GitHub OAuth
-        client ID, and Worker URL. See <code>web/README.md</code>.
+        <code>web/config.js</code> and fill in your GitHub OAuth client ID and Worker URL.
+        See <code>web/README.md</code>.
       </section>
 
-      <!-- Auth notices (e.g. admin-consent deep link when a tenant gates the app). -->
-      <section id="auth-notice" class="banner hidden"></section>
       <!-- Skip-to stepper. Source › Review › Act. Reachable once a repo is analyzed. -->
       <nav id="stepper" class="stepper" aria-label="Progress">
         <button class="stepper-item" data-stage="source" type="button">
@@ -83,7 +77,7 @@
         <h2>Point at a GitHub repo</h2>
         <p class="hint">
           Reads the repo's files in your browser via the GitHub API and infers what
-          Azure it needs. Nothing is sent anywhere except GitHub and (on deploy) Azure.
+          Azure it needs. Nothing is sent anywhere except GitHub.
         </p>
         <form id="repo-form" class="repo-form">
           <input
@@ -149,23 +143,14 @@
         <h3 class="actions-head">Proceed</h3>
         <div class="actions">
           <div class="action-card primary">
-            <h4>Create infra repo &amp; open PR</h4>
+            <h4>Create reviewable infra PR</h4>
             <p class="hint">
               Lands the Bicep + OIDC pipeline in a new GitHub repo as a pull request you
-              can review before merging. This is the repeatable path.
+              can review and share. The generated repo explains the one-time Azure connection
+              and how to deploy after merge.
             </p>
             <div id="codify-reason" class="reason hidden"></div>
-            <button id="go-codify" class="btn" type="button">Set up repo →</button>
-          </div>
-          <div class="action-card">
-            <h4>Run on Azure</h4>
-            <p class="hint">
-              Downloads a reviewable Azure CLI script that creates the target resource group
-              if needed, then runs what-if before application resources. It uses your own Azure
-              CLI session, so this app needs no tenant admin approval.
-            </p>
-            <div id="deploy-reason" class="reason hidden"></div>
-            <button id="go-deploy" class="btn" type="button">Get Azure handoff →</button>
+            <button id="go-codify" class="btn" type="button">Create handoff →</button>
           </div>
         </div>
       </section>
@@ -174,13 +159,21 @@
       <section id="stage-codify" class="stage hidden">
         <button class="back" data-stage="review" type="button">← Back to review</button>
         <div id="rail-codify" class="rail"></div>
-        <h2>Codify as a repo</h2>
+        <h2>Create the infrastructure handoff</h2>
         <p class="hint">
           Creates a new GitHub repo, commits the generated Bicep + OIDC pipeline to an
           <code>azx-infra</code> branch, and opens a pull request into the default branch
           so you can review before it lands. Requires GitHub sign-in. To create it in an
           organization, use <code>org-name/repo-name</code>.
         </p>
+        <div class="note">
+          <strong>What happens next</strong>
+          <ol class="handoff-steps">
+            <li>Review and share the generated pull request. Nothing deploys from this site.</li>
+            <li>While the PR is open, run <code>scripts/setup-azure-oidc.sh</code> once from its branch.</li>
+            <li>Merge to run what-if; manually run the workflow when you are ready to deploy.</li>
+          </ol>
+        </div>
         <div class="deploy-controls">
           <label>
             New repo
@@ -199,87 +192,13 @@
         <pre id="ship-log" class="code log"></pre>
       </section>
 
-      <!-- STAGE: deploy -->
-      <section id="stage-deploy" class="stage hidden">
-        <button class="back" data-stage="review" type="button">← Back to review</button>
-        <div id="rail-deploy" class="rail"></div>
-        <h2>Run on Azure</h2>
-        <p class="hint">
-          The recommended path runs through your authenticated Azure CLI or Cloud Shell session,
-          so azx never needs tenant consent. The script runs ARM <strong>what-if</strong> first
-          and requires you to type <code>deploy</code> before creating application resources.
-          Compute uses Microsoft placeholder images; application code is not deployed.
-        </p>
-        <div class="deploy-controls">
-          <label>
-            Resource group
-            <input id="rg-input" type="text" placeholder="rg-myapp" />
-          </label>
-          <label>
-            Region
-            <input id="region-input" type="text" placeholder="eastus2" />
-          </label>
-        </div>
-        <div id="deploy-reason-act" class="reason hidden"></div>
-        <div class="action-card primary cli-handoff">
-          <h4>Azure CLI / Cloud Shell — recommended</h4>
-          <p class="hint">
-            Download one self-contained script. Review it, upload it to Cloud Shell, and run it.
-            It creates the target resource group if needed, then runs what-if. It uses the active
-            subscription unless you set <code>AZURE_SUBSCRIPTION_ID</code>.
-          </p>
-          <ol class="handoff-steps">
-            <li>Download the deployment script.</li>
-            <li>Open Cloud Shell and upload the script.</li>
-            <li>Run the copied command; review what-if before confirming.</li>
-          </ol>
-          <div class="deploy-actions">
-            <button id="btn-download-cli" class="btn" type="button" disabled>Download deployment script</button>
-            <a class="btn" href="https://shell.azure.com/" target="_blank" rel="noopener noreferrer">Open Cloud Shell ↗</a>
-            <button id="btn-copy-cli" class="btn" type="button" disabled>Copy run command</button>
-          </div>
-          <p id="cli-handoff-status" class="status" role="status"></p>
-        </div>
-
-        <details class="disclose browser-deploy">
-          <summary>Direct browser provisioning — optional; tenant admin approval may be required</summary>
-          <div>
-            <p class="hint">
-              This path requests delegated Azure Resource Manager access. Many organizations
-              block unverified multi-tenant apps, so use the CLI handoff unless your admin has approved azx.
-            </p>
-            <button id="btn-azure" class="btn btn-azure" type="button">
-              <span class="dot" data-state="out"></span> Sign in with Azure for direct mode
-            </button>
-            <div class="deploy-controls">
-              <label>
-                Subscription
-                <select id="sub-select" disabled></select>
-              </label>
-              <label id="pg-field" class="hidden">
-                PostgreSQL admin password
-                <input id="pg-password" type="password" autocomplete="new-password" placeholder="@secure — not stored" />
-              </label>
-            </div>
-            <div id="browser-deploy-reason-act" class="reason hidden"></div>
-            <div class="deploy-actions">
-              <button id="btn-whatif" class="btn" type="button" disabled>Run browser what-if</button>
-              <button id="btn-apply" class="btn btn-danger" type="button" disabled>
-                Provision in browser
-              </button>
-            </div>
-          </div>
-        </details>
-        <pre id="deploy-log" class="code log"></pre>
-      </section>
     </main>
 
     <footer class="foot">
       <span
-        >Offline analysis runs in your browser. Azure tokens stay in tab-scoped session
-        storage. GitHub tokens are held in memory after passing transiently through the
-        operator's OAuth exchange Worker; neither token is intentionally logged or stored
-        server-side. Repo access uses the scopes shown at GitHub consent. This preview has
+        >Analysis runs in your browser. GitHub tokens are held in memory after passing
+        transiently through the operator's OAuth exchange Worker; they are not intentionally
+        logged or stored server-side. Repo access uses the scopes shown at GitHub consent. This preview has
         no SLA; report problems in
         <a href="https://github.com/stevenjma/intent-to-azure/issues" target="_blank" rel="noopener noreferrer"
           >GitHub Issues</a
@@ -288,6 +207,6 @@
     </footer>
 
     <script src="./config.js?v=20260818a"></script>
-    <script type="module" src="./bootstrap.js?v=20260911b"></script>
+    <script type="module" src="./bootstrap.js?v=20260914a"></script>
   </body>
 </html>

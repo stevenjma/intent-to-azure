@@ -36,8 +36,6 @@ jobs:
 
       - name: Generate web/config.js from repo Variables
         env:
-          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-          AZURE_TENANT: ${{ vars.AZURE_TENANT }}
           GH_OAUTH_CLIENT_ID: ${{ vars.GH_OAUTH_CLIENT_ID }}
           GH_WORKER_URL: ${{ vars.GH_WORKER_URL }}
           GH_SCOPES: ${{ vars.GH_SCOPES }}
@@ -45,22 +43,16 @@ jobs:
           node --input-type=module <<'NODE'
           import { writeFileSync } from "node:fs";
 
-          const required = ["AZURE_CLIENT_ID", "GH_OAUTH_CLIENT_ID", "GH_WORKER_URL"];
+          const required = ["GH_OAUTH_CLIENT_ID", "GH_WORKER_URL"];
           const missing = required.filter((name) => !process.env[name]?.trim());
           if (missing.length) {
             throw new Error(`Refusing production deploy: missing repository variable(s): ${missing.join(", ")}`);
           }
 
-          const azureClientId = process.env.AZURE_CLIENT_ID.trim();
-          if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(azureClientId)) {
-            throw new Error("AZURE_CLIENT_ID must be a GUID.");
-          }
           const worker = new URL(process.env.GH_WORKER_URL.trim());
           if (worker.protocol !== "https:") throw new Error("GH_WORKER_URL must use HTTPS.");
 
           const config = {
-            azureClientId,
-            azureTenant: process.env.AZURE_TENANT?.trim() || "common",
             githubClientId: process.env.GH_OAUTH_CLIENT_ID.trim(),
             githubWorkerUrl: worker.origin,
             githubScopes: process.env.GH_SCOPES?.trim() || "repo workflow read:user",
