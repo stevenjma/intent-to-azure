@@ -121,7 +121,7 @@ interface DepRule {
 }
 
 const NODE_DEPS: Record<string, DepRule> = {
-  next: { cap: "web-compute", conclusion: "web-compute (Next.js)", framework: "nextjs" },
+  next: { cap: "static-hostable-frontend", conclusion: "static-hostable frontend candidate (Next.js)", framework: "nextjs" },
   "@remix-run/node": { cap: "web-compute", conclusion: "web-compute (Remix)", framework: "remix" },
   nuxt: { cap: "web-compute", conclusion: "web-compute (Nuxt)", framework: "nuxt" },
   astro: { cap: "web-compute", conclusion: "web-compute (Astro)", framework: "astro" },
@@ -193,15 +193,19 @@ function detectNode(idx: RepoIndex, app: AppInfo, push: (s: Signal) => void): vo
     ...(pkg.dependencies as Record<string, string> | undefined),
     ...(pkg.devDependencies as Record<string, string> | undefined),
   };
+  const hasNext = "next" in deps;
+  const explicitServerDependency = ["express", "fastify", "@nestjs/core", "koa"].find((name) => name in deps);
 
-  // Lockfile → runtime manifest signal (independent evidence for web-compute).
-  const lock = idx.first("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb");
+  // A lockfile proves a build toolchain exists, not that the deployed app needs a server.
+  const lock = idx.first("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb");
   if (lock) {
+    app.lockfile = lock;
+    app.packageManager =
+      lock === "package-lock.json" ? "npm" : lock === "pnpm-lock.yaml" ? "pnpm" : lock === "yarn.lock" ? "yarn" : "bun";
     push({
       kind: "manifest",
       signal: `lockfile ${lock}`,
-      conclusion: "Node runtime (deployable web-compute)",
-      capability: "web-compute",
+      conclusion: "Node build toolchain",
       from: lock,
       weak: true,
     });
@@ -213,6 +217,20 @@ function detectNode(idx: RepoIndex, app: AppInfo, push: (s: Signal) => void): vo
     if (rule.framework) {
       detail.framework = rule.framework;
       if (!rule.weak) app.framework ??= rule.framework;
+    }
+    if (hasNext && explicitServerDependency) {
+      push({
+        kind: "dependency",
+        signal: `package.json depends on "${explicitServerDependency}"`,
+        conclusion: `HTTP server runtime required (${explicitServerDependency})`,
+        capability: "http-server-runtime",
+        detail: {
+          framework: explicitServerDependency,
+          staticExportDisqualifier: `${explicitServerDependency} server`,
+          requiredArtifact: "container-image",
+        },
+        from: pkgPath,
+      });
     }
     if (rule.provider) detail.provider = rule.provider;
     if (rule.option) detail.option = rule.option;
@@ -234,17 +252,100 @@ function detectNode(idx: RepoIndex, app: AppInfo, push: (s: Signal) => void): vo
     app.language ??= "javascript";
   }
 
-  // Framework files corroborate web-compute independently of the dependency.
+  // Framework configuration corroborates the static candidate independently.
   const nextCfg = idx.first("next.config.js", "next.config.ts", "next.config.mjs", "next.config.cjs");
   if (nextCfg) {
     app.framework ??= "nextjs";
     push({
       kind: "framework-file",
       signal: `${nextCfg} present`,
-      conclusion: "web-compute (Next.js)",
-      capability: "web-compute",
+      conclusion: "static-hostable frontend candidate (Next.js)",
+      capability: "static-hostable-frontend",
       detail: { framework: "nextjs" },
       from: nextCfg,
+    });
+  }
+  if (hasNext) detectNextHosting(idx, push, nextCfg);
+}
+
+function detectNextHosting(
+  idx: RepoIndex,
+  push: (s: Signal) => void,
+  nextCfg?: string,
+): void {
+  const sourceFiles = idx.match((p) => /\.(?:[cm]?[jt]sx?)$/.test(p));
+  const disqualifiers: Array<{ path: string; reason: string }> = [];
+
+  for (const path of sourceFiles) {
+    const text = idx.read(path) ?? "";
+    if (
+      /^(?:src\/)?app\/api\/(?:.+\/)?route\.[cm]?[jt]sx?$/.test(path) ||
+      /^(?:src\/)?pages\/api\/.+\.[cm]?[jt]sx?$/.test(path)
+    ) {
+      disqualifiers.push({ path, reason: "API route handler" });
+    }
+    if (/(^|\/)middleware\.[cm]?[jt]sx?$/.test(path)) {
+      disqualifiers.push({ path, reason: "Next.js middleware" });
+    }
+    if (/(?:^|\n)\s*["']use server["']\s*;?/m.test(text)) {
+      disqualifiers.push({ path, reason: "server action" });
+    }
+    if (/\bgetServerSideProps\b/.test(text)) {
+      disqualifiers.push({ path, reason: "getServerSideProps" });
+    }
+    if (/\b(?:cookies|headers)\s*\(\s*\)/.test(text)) {
+      disqualifiers.push({ path, reason: "dynamic request API" });
+    }
+    if (/(?:dynamic\s*=\s*["']force-dynamic["']|revalidate\s*=\s*(?:[1-9]\d*|0))/.test(text)) {
+      disqualifiers.push({ path, reason: "dynamic rendering or ISR" });
+    }
+    if (/\blocalStorage\b/.test(text)) {
+      push({
+        kind: "import",
+        signal: `${path} uses localStorage`,
+        conclusion: "client-only persistence",
+        capability: "client-only-persistence",
+        detail: { persistence: "browser-local" },
+        from: path,
+      });
+    }
+  }
+
+  const configText = nextCfg ? (idx.read(nextCfg) ?? "") : "";
+  if (nextCfg && /\boutput\s*:\s*["']standalone["']/.test(configText)) {
+    push({
+      kind: "config",
+      signal: `${nextCfg} configures output: standalone`,
+      conclusion: "HTTP server runtime required (Next.js standalone output)",
+      capability: "http-server-runtime",
+      detail: {
+        framework: "nextjs",
+        staticExportDisqualifier: "standalone server output",
+        requiredArtifact: "container-image",
+      },
+      from: nextCfg,
+    });
+  }
+  if (nextCfg && /\b(?:rewrites|redirects)\s*(?:\(|:)/.test(configText)) {
+    push({
+      kind: "config",
+      signal: `${nextCfg} defines rewrites or redirects`,
+      conclusion: "runtime-dependent routing may disqualify static export",
+      capability: "static-hostable-frontend",
+      detail: { hostingAmbiguity: true },
+      weak: true,
+      from: nextCfg,
+    });
+  }
+
+  for (const item of disqualifiers) {
+    push({
+      kind: item.reason === "API route handler" || item.reason === "Next.js middleware" ? "framework-file" : "import",
+      signal: `${item.path} contains ${item.reason}`,
+      conclusion: `HTTP server runtime required (${item.reason})`,
+      capability: "http-server-runtime",
+      detail: { framework: "nextjs", staticExportDisqualifier: item.reason, requiredArtifact: "container-image" },
+      from: item.path,
     });
   }
 }

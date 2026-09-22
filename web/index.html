@@ -15,13 +15,15 @@
       http-equiv="Content-Security-Policy"
       content="
         default-src 'none';
-        script-src 'self';
+        script-src 'self' https://js.monitor.azure.com;
         style-src 'self';
         img-src 'self' data:;
         font-src 'self';
         connect-src 'self'
           https://api.github.com
-          https://github.com;
+          https://github.com
+          https://*.in.applicationinsights.azure.com
+          https://dc.services.visualstudio.com;
         object-src 'none';
         upgrade-insecure-requests;
         base-uri 'none';
@@ -204,9 +206,16 @@
           >GitHub Issues</a
         >.</span
       >
+      <span id="telemetry-disclosure" class="hidden">
+       Anonymous usage telemetry records workflow stages, durations, coarse framework and
+       resource counts, and failure codes in Azure Monitor, which may add coarse
+       browser/device and location context. It excludes GitHub identity, repository
+       names and URLs, source content, and tokens.
+       <button id="telemetry-toggle" class="link-button" type="button"></button>
+      </span>
     </footer>
 
     <script src="./config.js?v=20260818a"></script>
-    <script type="module" src="./bootstrap.js?v=20260914a"></script>
+    <script type="module" src="./bootstrap.js?v=20260917a"></script>
   </body>
 </html>

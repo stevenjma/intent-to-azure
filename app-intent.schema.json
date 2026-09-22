@@ -49,6 +49,9 @@
       "description": "A capability name. The listed values are the MVP corpus; any string is accepted so third parties can introduce new capabilities.",
       "type": "string",
       "examples": [
+        "static-hostable-frontend",
+        "http-server-runtime",
+        "client-only-persistence",
         "web-compute",
         "transactional-relational",
         "chat-model",
@@ -68,6 +71,8 @@
         "framework": { "type": "string", "description": "Primary framework, e.g. nextjs, fastapi, django." },
         "language": { "type": "string", "description": "Primary language, e.g. typescript, python." },
         "runtime": { "type": "string", "description": "Runtime hint, e.g. node, python." }
+        ,"packageManager": { "type": "string", "enum": ["npm", "pnpm", "yarn", "bun"], "description": "Package manager selected from the repository lockfile." }
+        ,"lockfile": { "type": "string", "description": "Repo-relative lockfile used for immutable CI installs." }
       }
     },
     "need": {
@@ -91,8 +96,10 @@
           }
         },
         "confidence": { "$ref": "#/$defs/confidence" },
+        "basis": { "type": "string", "enum": ["observed", "inferred", "user-confirmed"], "description": "Whether the capability was observed directly, inferred, or explicitly confirmed." },
         "rationale": { "type": "string", "description": "Plain-English justification." },
-        "evidence": { "type": "array", "items": { "type": "string" }, "description": "Human-readable summaries of the signals that produced this need." }
+        "evidence": { "type": "array", "items": { "type": "string" }, "description": "Human-readable summaries of the signals that produced this need." },
+        "assumptions": { "type": "array", "items": { "type": "string" }, "description": "Material assumptions that remain unverified." }
       }
     },
     "signal": {

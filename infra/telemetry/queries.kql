@@ -1,0 +1,60 @@
+// Analysis-to-PR funnel for the selected period.
+let events = dynamic([
+  "page_loaded",
+  "analysis_started",
+  "analysis_succeeded",
+  "codify_viewed",
+  "pr_create_started",
+  "pr_created"
+]);
+customEvents
+| where timestamp > ago(30d)
+| where name in (events)
+| summarize Sessions=dcount(tostring(customDimensions.sessionId)) by name
+| extend FunnelOrder=array_index_of(events, name)
+| order by FunnelOrder asc
+
+// Authentication and assumption decisions are conditional, not universal funnel steps.
+customEvents
+| where timestamp > ago(30d)
+| where name in (
+    "github_auth_succeeded",
+    "github_auth_restored",
+    "github_auth_failed",
+    "assumptions_confirmed"
+  )
+| summarize Sessions=dcount(tostring(customDimensions.sessionId)) by name
+| order by name asc
+
+// Reliability and latency by workflow stage.
+customEvents
+| where timestamp > ago(30d)
+| where name in ("analysis_succeeded", "analysis_failed", "pr_created", "pr_create_failed")
+| summarize
+    Events=count(),
+    Sessions=dcount(tostring(customDimensions.sessionId)),
+    P50DurationMs=percentile(toint(customMeasurements.durationMs), 50),
+    P90DurationMs=percentile(toint(customMeasurements.durationMs), 90)
+  by name, tostring(customDimensions.errorCode)
+| order by name asc
+
+// Repeat browsers. This is a pseudonymous browser measure, not a person or employee identity.
+customEvents
+| where timestamp > ago(30d)
+| where name == "page_loaded"
+| summarize ActiveDays=dcount(startofday(timestamp)) by tostring(customDimensions.anonymousUserId)
+| summarize
+    ObservedBrowsers=count(),
+    RepeatBrowsers=countif(ActiveDays > 1),
+    RepeatRate=round(100.0 * countif(ActiveDays > 1) / count(), 1)
+
+// Planning quality signals without repository identity or source data.
+customEvents
+| where timestamp > ago(30d)
+| where name == "analysis_succeeded"
+| summarize
+    Analyses=count(),
+    AvgConfirmations=avg(toint(customMeasurements.confirmationCount)),
+    AvgResources=avg(toint(customMeasurements.resourceCount))
+  by tostring(customDimensions.framework), tostring(customDimensions.hosting)
+| order by Analyses desc

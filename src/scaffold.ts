@@ -23,6 +23,12 @@ export interface ScaffoldFile {
 }
 
 export interface ScaffoldOptions {
+  /** Application source repository for build/publish, in owner/repo form. */
+  sourceRepository?: string;
+  /** Immutable application commit analyzed by the hosted flow. */
+  sourceRef?: string;
+  /** Application directory relative to the source repository root. */
+  sourcePath?: string;
   /** Target resource group name; defaults to `rg-<app-slug>`. */
   resourceGroup?: string;
   /** Override the deploy region; defaults to `plan.region`. */
@@ -93,10 +99,43 @@ export function buildScaffold(
     throw new Error(`buildScaffold: unsafe subscription "${subscriptionId}" — refusing to generate.`);
   }
   const needsPgPassword = planNeedsPgPassword(plan);
+  const staticSite = plan.resources.find((resource) => resource.type === "Microsoft.Web/staticSites");
+  const sourceRepository =
+    opts.sourceRepository ?? (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(intent.app.root) ? intent.app.root : undefined);
+  if (opts.sourceRef !== undefined && !/^[0-9a-f]{40}$/.test(opts.sourceRef)) {
+    throw new Error("buildScaffold: sourceRef must be a full lowercase commit SHA.");
+  }
+  const sourcePath = opts.sourcePath ?? ".";
+  if (
+    sourcePath !== "." &&
+    (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(sourcePath) ||
+      sourcePath.split("/").some((part) => part === "." || part === ".."))
+  ) {
+    throw new Error("buildScaffold: sourcePath must be a safe repository-relative directory.");
+  }
+  if (staticSite && (!intent.app.packageManager || !intent.app.lockfile)) {
+    throw new Error(
+      "buildScaffold: static application delivery requires a supported lockfile " +
+        "(package-lock.json, pnpm-lock.yaml, yarn.lock, or bun.lockb).",
+    );
+  }
 
   const files: ScaffoldFile[] = [
     { path: "infra/main.bicep", content: bicep },
-    { path: ".github/workflows/deploy.yml", content: deployWorkflow(rg, region, needsPgPassword) },
+    {
+      path: ".github/workflows/deploy.yml",
+      content: deployWorkflow(
+        rg,
+        region,
+        needsPgPassword,
+        staticSite?.name,
+        sourceRepository,
+        opts.sourceRef,
+        sourcePath,
+        intent.app.packageManager,
+        intent.app.lockfile,
+      ),
+    },
     { path: "README.md", content: readme(intent, plan, rg, region, needsPgPassword, opts.ledger) },
     { path: ".azx/plan.json", content: JSON.stringify({ intent, plan }, null, 2) + "\n" },
     {
@@ -123,7 +162,18 @@ export function buildScaffold(
  * AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID are provisioned once
  * by scripts/setup-azure-oidc.sh (shipped in this repo). No client secret is stored.
  */
-function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): string {
+function deployWorkflow(
+  rg: string,
+  region: string,
+  needsPgPassword: boolean,
+  staticSiteName?: string,
+  sourceRepository?: string,
+  sourceRef?: string,
+  sourcePath = ".",
+  packageManager?: AppIntent["app"]["packageManager"],
+  lockfile?: string,
+): string {
+  const applicationDirectory = sourcePath === "." ? "application" : `application/${sourcePath}`;
   const loginStep = [
     "      - name: Azure login (OIDC)",
     "        uses: azure/login@8216e11d8cd9b42fe925c852af8e76311ff067ac # v2",
@@ -184,6 +234,86 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
         "# PG_ADMIN_PASSWORD before deploying — it is passed as the admin password.",
       ]
     : [];
+  const sourceNote = staticSiteName
+    ? [
+        "#",
+        "# Static application delivery checks out the source repository, runs its locked",
+        "# dependency install and build, verifies the `out/` export, then publishes that",
+        "# exact directory. A failed export stops the workflow; it never changes hosting class.",
+      ]
+    : [];
+  const staticPublish = staticSiteName
+    ? [
+        "",
+        "  publish-static-app:",
+        "    needs: deploy",
+        deployGuard,
+        "    runs-on: ubuntu-latest",
+        "    environment: production",
+        "    steps:",
+        ...(!sourceRepository
+          ? [
+              "      - name: Require application source",
+              "        if: ${{ vars.APP_SOURCE_REPOSITORY == '' }}",
+              `        run: echo "::error::Set APP_SOURCE_REPOSITORY to the application owner/repo before deploying." && exit 1`,
+            ]
+          : []),
+        "      - name: Check out application source",
+        "        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4",
+        "        with:",
+        `          repository: ${sourceRepository ?? "${{ vars.APP_SOURCE_REPOSITORY }}"}`,
+        ...(sourceRef ? [`          ref: ${sourceRef}`] : []),
+        "          token: ${{ secrets.APP_SOURCE_TOKEN || github.token }}",
+        "          path: application",
+        ...(packageManager === "bun"
+          ? [
+              "      - name: Set up Bun",
+              "        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2",
+            ]
+          : [
+              "      - name: Set up Node.js",
+              "        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4",
+              "        with:",
+              "          node-version: 22",
+              ...(packageManager === "pnpm"
+                ? []
+                : [
+                    `          cache: ${packageManager}`,
+                    `          cache-dependency-path: ${applicationDirectory}/${lockfile}`,
+                  ]),
+              ...(packageManager === "pnpm" || packageManager === "yarn"
+                ? ["      - name: Enable Corepack", "        run: corepack enable"]
+                : []),
+            ]),
+        "      - name: Build and verify static export",
+        `        working-directory: ${applicationDirectory}`,
+        "        run: |",
+        `          ${immutableInstall(packageManager)}`,
+        `          ${buildCommand(packageManager)}`,
+        `          [ -d out ] || { echo "::error::Next.js did not produce out/. Configure output: 'export' in next.config and regenerate only if server hosting is required."; exit 1; }`,
+        "      - name: Azure login (OIDC)",
+        "        uses: azure/login@8216e11d8cd9b42fe925c852af8e76311ff067ac # v2",
+        "        with:",
+        "          client-id: ${{ vars.AZURE_CLIENT_ID }}",
+        "          tenant-id: ${{ vars.AZURE_TENANT_ID }}",
+        "          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}",
+        "      - name: Read Static Web Apps deployment token",
+        "        id: swa-token",
+        "        run: |",
+        `          TOKEN="$(az rest --method post --url "https://management.azure.com/subscriptions/\${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Web/staticSites/$STATIC_WEB_APP_NAME/listSecrets?api-version=2023-12-01" --query properties.apiKey -o tsv)"`,
+        '          [ -n "$TOKEN" ] || { echo "::error::Azure returned no Static Web Apps deployment token."; exit 1; }',
+        '          echo "::add-mask::$TOKEN"',
+        '          echo "value=$TOKEN" >> "$GITHUB_OUTPUT"',
+        "      - name: Publish verified static artifact",
+        "        uses: Azure/static-web-apps-deploy@1a947af9992250f3bc2e68ad0754c0b0c11566c9 # v1",
+        "        with:",
+        "          azure_static_web_apps_api_token: ${{ steps.swa-token.outputs.value }}",
+        "          action: upload",
+        `          app_location: ${applicationDirectory}/out`,
+        "          output_location: ''",
+        "          skip_app_build: true",
+      ]
+    : [];
 
   return [
     "# deploy.yml — generated by azx `ship`.",
@@ -205,6 +335,7 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "# Jobs are guarded on AZURE_CLIENT_ID and the repository's actual default branch.",
     "# Pushes run preview only; real deployment always requires a manual workflow run.",
     ...pgNote,
+    ...sourceNote,
     "",
     "name: deploy",
     "",
@@ -226,6 +357,8 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "env:",
     `  RESOURCE_GROUP: "${rg}"`,
     `  LOCATION: "${region}"`,
+    ...(staticSiteName ? [`  STATIC_WEB_APP_NAME: "${staticSiteName}"`] : []),
+    ...(sourceRepository ? [`  APP_SOURCE_REPOSITORY: "${sourceRepository}"`] : []),
     "",
     "jobs:",
     "  what-if:",
@@ -240,6 +373,7 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
     "      - name: What-if (preview deployment changes)",
     ...deployRun("what-if", []),
     ...cleanupStep,
+    ...staticPublish,
     "",
     "  deploy:",
     "    needs: what-if",
@@ -259,6 +393,25 @@ function deployWorkflow(rg: string, region: string, needsPgPassword: boolean): s
   ].join("\n");
 }
 
+function immutableInstall(packageManager: AppIntent["app"]["packageManager"]): string {
+  switch (packageManager) {
+    case "npm":
+      return "npm ci";
+    case "pnpm":
+      return "pnpm install --frozen-lockfile";
+    case "yarn":
+      return "yarn install --frozen-lockfile";
+    case "bun":
+      return "bun install --frozen-lockfile";
+    default:
+      throw new Error("deployWorkflow: unsupported package manager.");
+  }
+}
+
+function buildCommand(packageManager: AppIntent["app"]["packageManager"]): string {
+  return packageManager === "npm" ? "npm run build" : `${packageManager} run build`;
+}
+
 function readme(
   intent: AppIntent,
   plan: AzurePlan,
@@ -276,11 +429,23 @@ function readme(
   const cost = plan.budget
     ? `Advisory modeled total: **~$${plan.budget.estimatedMonthlyUsd}/mo ${plan.budget.currency}**. This is not a hard spend limit; usage charges can exceed it.`
     : "";
+  const hasStaticSite = plan.resources.some((r) => r.type === "Microsoft.Web/staticSites");
+  const hasContainerPlaceholder = plan.resources.some(
+    (r) => r.type === "Microsoft.App/containerApps" || r.type === "Microsoft.App/jobs",
+  );
 
   const secretStep = needsPgPassword
     ? [
         "- **PostgreSQL only:** add repository secret `PG_ADMIN_PASSWORD` (Settings → Secrets and",
         "   variables → Actions) — the PostgreSQL admin password for the real deploy.",
+      ]
+    : [];
+  const staticSourceStep = hasStaticSite
+    ? [
+        "- **Static application source:** ensure `APP_SOURCE_REPOSITORY` identifies the",
+        "  application `owner/repo` (the hosted flow sets this automatically). For a private",
+        "  source repo, add `APP_SOURCE_TOKEN` with read access. Configure Next.js with",
+        "  `output: 'export'`; CI fails with an actionable error if no `out/` directory is produced.",
       ]
     : [];
 
@@ -313,13 +478,23 @@ function readme(
           "",
         ]
     : [];
-
   return [
     `# ${intent.app.name}`,
     "",
     "> Infrastructure repo generated by **azx** (`azx ship`). The Bicep and the CI/CD",
     "> pipeline are committed here; the pipeline does the real Azure deploy via OIDC.",
-    "> Compute resources use Microsoft placeholder images. This repo does not build, wire, or run the application itself.",
+    ...(hasStaticSite
+      ? [
+          "> For the static-hosting path, the workflow checks out the application repository,",
+          "> verifies its real `out/` build artifact, and publishes that artifact to Static Web Apps.",
+        ]
+      : []),
+    ...(hasContainerPlaceholder
+      ? [
+          "> **Incomplete application delivery:** container resources still use Microsoft placeholder",
+          "> images. This repo provisions their infrastructure but does not claim to deploy the application.",
+        ]
+      : []),
     "",
     ...adoptionNote,
     "## What gets deployed",
@@ -354,6 +529,7 @@ function readme(
     "   control that keeps the `main` credential from acting inside this resource group",
     "   without review.",
     ...secretStep,
+    ...staticSourceStep,
     "",
     "6. Merge the PR. The merge runs ARM **what-if** only; inspect that workflow run.",
     "7. When the preview is acceptable, manually run the `deploy` workflow on the",

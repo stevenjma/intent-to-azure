@@ -6,7 +6,7 @@
  * persists tokens.
  */
 
-import { resolveScan } from "./engine/web-engine.js?v=20260914a";
+import { resolveScan } from "./engine/web-engine.js?v=20260917a";
 import {
   githubSignIn,
   githubSignOut,
@@ -19,7 +19,13 @@ import {
   listAccessibleRepos,
   orgGrantUrl,
   searchRepos,
-} from "./github.js?v=20260914a";
+} from "./github.js?v=20260917a";
+import {
+  initializeTelemetry,
+  setTelemetryEnabled,
+  telemetryState,
+  trackEvent,
+} from "./telemetry.js?v=20260917a";
 
 const cfg = window.AZX_CONFIG || {};
 const $ = (id) => document.getElementById(id);
@@ -41,6 +47,8 @@ const dirty = { ship: false };
 // --------------------------------------------------------------------------
 
 export function boot(oauthResult = null) {
+  initializeTelemetry(cfg).then(updateTelemetryDisclosure);
+  trackEvent("page_loaded", { stage: currentStage });
   // Name every required identifier so the setup banner can say exactly what's
   // missing (self-host forkers hit partial-config states otherwise — DR-010).
   const REQUIRED = [
@@ -73,7 +81,15 @@ export function boot(oauthResult = null) {
   });
   $("confirm-assumptions").addEventListener("change", (event) => {
     confirmationApprovalSequence = event.target.checked ? analysisSequence : -1;
+    if (event.target.checked) {
+      trackEvent("assumptions_confirmed", { stage: "review" }, {
+        confirmationCount: current?.plan?.confirmations?.length || 0,
+      });
+    }
     updateAvailability();
+  });
+  $("telemetry-toggle").addEventListener("click", () => {
+    setTelemetryEnabled(!telemetryState().enabled);
   });
 
   // Deep-link support: #review / #codify on boot (guarded).
@@ -96,6 +112,7 @@ function goToStage(stage) {
   // Every stage past source requires an analyzed repo.
   if (stage !== "source" && !current) return;
   currentStage = stage;
+  if (stage === "codify") trackEvent("codify_viewed", { stage });
   history.replaceState(null, "", `#${stage}`);
   render();
 }
@@ -146,11 +163,15 @@ async function restoreSessions(oauthResult) {
     let ghUser = await handleGithubRedirect(oauthResult);
     if (!ghUser) ghUser = await restoreGithubSession();
     if (ghUser) {
+      trackEvent(oauthResult?.token ? "github_auth_succeeded" : "github_auth_restored", {
+        stage: currentStage,
+      });
       setDot("btn-github", "in");
       $("btn-github").lastChild.textContent = ` ${ghUser.login}`;
       loadRepoChoices();
     }
   } catch (err) {
+    trackEvent("github_auth_failed", { stage: currentStage, errorCode: classifyError(err) });
     if (!err?.redirecting) console.warn("GitHub session restore:", err.message);
   }
 
@@ -171,6 +192,7 @@ async function onGithubAuth() {
   setDot("btn-github", "pending");
   try {
     const user = await githubSignIn(cfg);
+    trackEvent("github_auth_succeeded", { stage: currentStage });
     setDot("btn-github", "in");
     $("btn-github").lastChild.textContent = ` ${user.login}`;
     render();
@@ -178,6 +200,7 @@ async function onGithubAuth() {
   } catch (err) {
     if (err?.redirecting) return; // navigating away to GitHub
     setDot("btn-github", "out");
+    trackEvent("github_auth_failed", { stage: currentStage, errorCode: classifyError(err) });
     alert(`GitHub sign-in failed: ${err.message}`);
   }
 }
@@ -251,6 +274,8 @@ async function onAnalyze(ev) {
   analysisController?.abort();
   analysisController = new AbortController();
   const sequence = ++analysisSequence;
+  const startedAt = performance.now();
+  trackEvent("analysis_started", { stage: "source" });
   current = null;
   confirmationApprovalSequence = -1;
   if (currentStage !== "source") goToStage("source");
@@ -259,7 +284,7 @@ async function onAnalyze(ev) {
   status.className = "status";
   status.textContent = "Fetching repo files…";
   try {
-    const { owner, repo, files, truncated } = await fetchRepoFiles(ownerRepo, ref, {
+    const { owner, repo, files, commitSha, truncated } = await fetchRepoFiles(ownerRepo, ref, {
       signal: analysisController.signal,
     });
     if (sequence !== analysisSequence) return;
@@ -271,19 +296,50 @@ async function onAnalyze(ev) {
     }
     status.textContent = `Scanned ${files.size} files. Resolving plan…`;
 
-    const result = resolveScan(repo, files);
+    const result = resolveScan(repo, files, {
+      scaffold: { sourceRepository: `${owner}/${repo}`, sourceRef: commitSha, sourcePath: "." },
+    });
     if (sequence !== analysisSequence) return;
-    current = { ...result, appName: repo, owner, hosting: detectCurrentHosting(files) };
+    current = {
+      ...result,
+      appName: repo,
+      owner,
+      repo,
+      files,
+      commitSha,
+      hosting: detectCurrentHosting(files),
+    };
     renderReview(current);
     resetActionState(owner, repo);
 
     status.className = "status ok";
     status.textContent = `Done — ${result.plan.resources.length} Azure resource(s) planned for “${repo}”.`;
+    trackEvent(
+      "analysis_succeeded",
+      {
+        stage: "review",
+        framework: result.intent.app.framework || "unknown",
+        hosting: result.intent.needs.some((need) => need.capability === "static-hostable-frontend")
+          ? "static"
+          : "server",
+      },
+      {
+        durationMs: performance.now() - startedAt,
+        fileCount: files.size,
+        resourceCount: result.plan.resources.length,
+        confirmationCount: result.plan.confirmations?.length || 0,
+      },
+    );
     goToStage("review");
   } catch (err) {
     if (sequence !== analysisSequence || err?.name === "AbortError") return;
     status.className = "status err";
     renderRepoError(status, err);
+    trackEvent(
+      "analysis_failed",
+      { stage: "source", errorCode: classifyError(err) },
+      { durationMs: performance.now() - startedAt },
+    );
   }
 }
 
@@ -373,7 +429,9 @@ function renderConfirmationGate(plan) {
   const list = $("confirmation-list");
   const checkbox = $("confirm-assumptions");
   const confirmations = plan.confirmations?.filter((confirmation) => confirmation.confidence !== "high") || [];
-  const requiredDecisions = confirmations.filter((confirmation) => !confirmation.assumption);
+  const requiredDecisions = confirmations.filter(
+    (confirmation) => !confirmation.assumption || confirmation.id === "hosting:static-export",
+  );
   list.textContent = "";
   checkbox.checked = confirmationApprovalSequence === analysisSequence;
   checkbox.disabled = requiredDecisions.length > 0;
@@ -388,8 +446,43 @@ function renderConfirmationGate(plan) {
         : "Decision required: update the source configuration or guardrails, then analyze again.",
     );
     item.textContent = `${confirmation.question} (${details.join(" ")})`;
+    if (confirmation.id === "hosting:static-export") {
+      const choice = document.createElement("select");
+      choice.setAttribute("aria-label", "Hosting class");
+      for (const [value, label] of [
+        ["", "Choose hosting class"],
+        ["static", "Static-compatible routing"],
+        ["server", "Requires runtime request handling"],
+      ]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        choice.appendChild(option);
+      }
+      choice.addEventListener("change", () => {
+        if (choice.value) applyHostingOverride(choice.value);
+      });
+      item.append(" ", choice);
+    }
     list.appendChild(item);
   }
+}
+
+function applyHostingOverride(hostingOverride) {
+  if (!current || (hostingOverride !== "static" && hostingOverride !== "server")) return;
+  analysisSequence += 1;
+  confirmationApprovalSequence = -1;
+  const result = resolveScan(current.repo, current.files, {
+    hostingOverride,
+    scaffold: {
+      sourceRepository: `${current.owner}/${current.repo}`,
+      sourceRef: current.commitSha,
+      sourcePath: ".",
+    },
+  });
+  current = { ...current, ...result, hostingOverride };
+  renderReview(current);
+  updateAvailability();
 }
 
 function renderMigrationNote(hosting) {
@@ -539,11 +632,13 @@ async function onShip() {
   const log = $("ship-log");
   const write = (m) => (log.textContent += m + "\n");
   log.textContent = "";
+  const startedAt = performance.now();
   try {
     requireResolvedConfirmations();
     const name = $("ship-repo-input").value.trim();
     if (!name) throw new Error("Enter a name for the new repo.");
     const isPrivate = $("ship-private").checked;
+    trackEvent("pr_create_started", { stage: "codify" });
     const files = current.scaffold.map((f) => ({ path: f.path, contents: f.content }));
     write(`▶ Creating ${isPrivate ? "private " : ""}repo “${name}”, committing ${files.length} files, and opening a PR…`);
     const res = await createRepoAndPush(
@@ -554,9 +649,15 @@ async function onShip() {
     );
     write(`\n✔ Repo created: ${res.htmlUrl}`);
     write(`✔ Pull request opened: ${res.prUrl}`);
+    trackEvent("pr_created", { stage: "codify" }, { durationMs: performance.now() - startedAt });
     write("\n  Nothing has deployed. Review and share the PR.");
     write("  Follow its README to connect Azure once. Merge to run what-if; deploy later with a manual workflow run.");
   } catch (err) {
+    trackEvent(
+      "pr_create_failed",
+      { stage: "codify", errorCode: classifyError(err) },
+      { durationMs: performance.now() - startedAt },
+    );
     const r = err.orgRestriction;
     if (r) {
       log.append(
@@ -579,6 +680,32 @@ async function onShip() {
       write(`\n✖ ${err.message}`);
     }
   }
+}
+
+function updateTelemetryDisclosure() {
+  const state = telemetryState();
+  const disclosure = $("telemetry-disclosure");
+  disclosure.classList.toggle("hidden", !state.configured);
+  if (!state.configured) return;
+  const toggle = $("telemetry-toggle");
+  if (state.doNotTrack) {
+    toggle.textContent = "Disabled by browser privacy setting.";
+    toggle.disabled = true;
+  } else {
+    toggle.textContent = state.enabled ? "Turn off telemetry" : "Turn on telemetry";
+    toggle.disabled = false;
+  }
+}
+
+function classifyError(error) {
+  const message = String(error?.message || "");
+  if (error?.orgRestriction) return "github_org_restricted";
+  if (/incomplete|truncated|safety cap/i.test(message)) return "scan_incomplete";
+  if (/No readable text files/i.test(message)) return "no_readable_files";
+  if (/confirmation/i.test(message)) return "unresolved_confirmation";
+  if (/OAuth state/i.test(message)) return "oauth_state";
+  if (/sign-in|GitHub/i.test(message)) return "github_request";
+  return "unknown";
 }
 
 // --------------------------------------------------------------------------

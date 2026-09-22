@@ -13,6 +13,7 @@ export const API_VERSIONS: Record<string, string> = {
   "Microsoft.App/managedEnvironments": "2024-03-01",
   "Microsoft.App/containerApps": "2024-03-01",
   "Microsoft.App/jobs": "2024-03-01",
+  "Microsoft.Web/staticSites": "2023-12-01",
   "Microsoft.DBforPostgreSQL/flexibleServers": "2024-08-01",
   "Microsoft.DBforPostgreSQL/flexibleServers/databases": "2024-08-01",
   "Microsoft.DBforPostgreSQL/flexibleServers/configurations": "2024-08-01",
@@ -173,6 +174,8 @@ function skuBlock(r: AzureResource): string[] | undefined {
       return ["sku: {", `  name: ${bicepString(r.sku ?? "basic")}`, "}"];
     case "Microsoft.Storage/storageAccounts":
       return ["sku: {", `  name: ${bicepString(r.sku ?? "Standard_LRS")}`, "}"];
+    case "Microsoft.Web/staticSites":
+      return ["sku: {", `  name: ${bicepString(r.sku ?? "Free")}`, `  tier: ${bicepString(r.sku ?? "Free")}`, "}"];
     case "Microsoft.CognitiveServices/accounts/deployments": {
       const capacity = numProp(r, "capacityK", 10);
       return ["sku: {", "  name: 'Standard'", `  capacity: ${capacity}`, "}"];
@@ -191,6 +194,8 @@ function kindFor(r: AzureResource): string | undefined {
 function propertiesBlock(r: AzureResource, idToSymbol: Map<string, string>): string[] | undefined {
   switch (r.type) {
     case "Microsoft.App/managedEnvironments":
+      return ["properties: {}"];
+    case "Microsoft.Web/staticSites":
       return ["properties: {}"];
     case "Microsoft.App/containerApps": {
       const port = numDeep(r, ["ingress", "targetPort"], 3000);

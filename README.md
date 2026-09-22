@@ -71,6 +71,9 @@ node dist/src/cli.js plan ../my-service
 - the resolved **Azure plan** — plain-English resources plus `main.bicep`
 - any **confirmation cards** for guesses `azx` will not make silently
 
+For framework hosting, `--hosting static|server` is the explicit override when
+repository evidence is ambiguous or an operator has external knowledge.
+
 (See the Confidence model, contract, and Capability → Azure mapping sections below for how each is derived.)
 
 **Bring your own policy.** Drop either file in your repo and `azx` picks it up automatically
@@ -139,6 +142,7 @@ Capability vocabulary (extendable — a new capability never breaks existing one
 though wiring one into `azx` end-to-end is a deliberate multi-file change; see
 [SPEC §10](./SPEC.md#10-how-to-add-a-capability)):
 
+`static-hostable-frontend` · `http-server-runtime` · `client-only-persistence` ·
 `web-compute` · `transactional-relational` (with `branching`, `consistency`) · `chat-model` ·
 `embeddings` · `search-index` · `object-storage` · `background-jobs`
 
@@ -162,7 +166,10 @@ though wiring one into `azx` end-to-end is a deliberate multi-file change; see
 
 | Capability                  | Azure service (default)                 | Fallbacks considered            |
 | --------------------------- | --------------------------------------- | ------------------------------- |
-| `web-compute`               | Container Apps                          | App Service · Static Web Apps   |
+| `static-hostable-frontend`  | Static Web Apps (static export only)    | CI verifies the real `out/` artifact |
+| `http-server-runtime`       | Container Apps                          | Application image pipeline is reported incomplete |
+| `client-only-persistence`   | No Azure resource                       | Browser-local state only        |
+| `web-compute`               | Container Apps                          | Legacy/general server capability |
 | `transactional-relational`  | PostgreSQL Flexible Server              | —                               |
 | `chat-model`                | Azure OpenAI                            | —                               |
 | `embeddings` / `search-index` | Azure AI Search                       | **pgvector stays in Postgres** (raised as a confirm card) |

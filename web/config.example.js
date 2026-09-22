@@ -33,4 +33,13 @@ window.AZX_CONFIG = {
    * pipeline (GitHub rejects workflow-file writes without it).
    */
   githubScopes: "repo workflow read:user",
+
+  /**
+   * Public workspace-based Application Insights connection string. This is an
+   * ingestion identifier, not a credential. Leave empty to disable telemetry.
+   */
+  applicationInsightsConnectionString: "",
+
+  /** Exact deployed commit, injected by the Pages workflow. */
+  releaseSha: "",
 };

@@ -3,19 +3,17 @@
   "region": "eastus2",
   "apps": {
     "next-minimal": {
-      "needs": ["web-compute"],
+      "needs": ["static-hostable-frontend"],
       "resources": [
-        { "id": "app-env", "type": "Microsoft.App/managedEnvironments" },
-        { "id": "web", "type": "Microsoft.App/containerApps" }
+        { "id": "web", "type": "Microsoft.Web/staticSites" }
       ],
       "compile": "pass",
       "whatif": "pass"
     },
     "next-prisma-postgres": {
-      "needs": ["web-compute", "transactional-relational"],
+      "needs": ["static-hostable-frontend", "transactional-relational"],
       "resources": [
-        { "id": "app-env", "type": "Microsoft.App/managedEnvironments" },
-        { "id": "web", "type": "Microsoft.App/containerApps" },
+        { "id": "web", "type": "Microsoft.Web/staticSites" },
         { "id": "postgres", "type": "Microsoft.DBforPostgreSQL/flexibleServers" },
         { "id": "postgres-db", "type": "Microsoft.DBforPostgreSQL/flexibleServers/databases" }
       ],
@@ -23,7 +21,7 @@
       "whatif": "pass"
     },
     "next-openai": {
-      "needs": ["web-compute", "chat-model"],
+      "needs": ["http-server-runtime", "chat-model"],
       "resources": [
         { "id": "app-env", "type": "Microsoft.App/managedEnvironments" },
         { "id": "web", "type": "Microsoft.App/containerApps" },
@@ -34,10 +32,9 @@
       "whatif": "pass"
     },
     "next-blob-storage": {
-      "needs": ["web-compute", "object-storage"],
+      "needs": ["static-hostable-frontend", "object-storage"],
       "resources": [
-        { "id": "app-env", "type": "Microsoft.App/managedEnvironments" },
-        { "id": "web", "type": "Microsoft.App/containerApps" },
+        { "id": "web", "type": "Microsoft.Web/staticSites" },
         { "id": "storage", "type": "Microsoft.Storage/storageAccounts" },
         { "id": "blob", "type": "Microsoft.Storage/storageAccounts/blobServices/containers" }
       ],
