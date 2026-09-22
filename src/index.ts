@@ -27,12 +27,13 @@ export type { ExtractOptions } from "./extract-intent.js";
 export { loadGuardrails, parseGuardrails } from "./guardrails.js";
 export { loadBudget, classifyOffer, prefersEconomy, describeBudget } from "./budget.js";
 
-export { plan, DEFAULT_REGION, slugifyRegion } from "./plan.js";
+export { plan, DEFAULT_REGION, HOSTING_POLICY, slugifyRegion } from "./plan.js";
 export type { PlanOptions } from "./plan.js";
 
 export {
   buildManagedEnvironment,
   buildWebCompute,
+  buildStaticFrontend,
   buildRelational,
   buildChatModel,
   buildSearch,

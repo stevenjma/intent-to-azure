@@ -94,7 +94,10 @@ fields are **produced by**, not **required of**, an emitter.
 
 | Capability | Meaning | Key `options` |
 |---|---|---|
-| `web-compute` | HTTP app / API to run | — |
+| `static-hostable-frontend` | Frontend inferred eligible for static export | `requiredArtifact: static-directory` |
+| `http-server-runtime` | Explicit HTTP server / SSR runtime | `requiredArtifact: container-image` |
+| `client-only-persistence` | Browser-local state with no shared backend | `persistence: browser-local` |
+| `web-compute` | General HTTP app / API to run | — |
 | `transactional-relational` | Relational OLTP database | `branching`, `consistency`, `pgvector`, `engine` |
 | `chat-model` | LLM chat / completions | `provider`, `models` |
 | `embeddings` | Embedding generation | `provider`, `models`, `servedBy` |
@@ -134,7 +137,10 @@ and `azx plan`. Only `medium` / `low` items become confirmations.
 
 | Capability | Azure service | Notes / fallbacks |
 |---|---|---|
-| `web-compute` | Container Apps | fallback: App Service / Static Web Apps |
+| `static-hostable-frontend` | Static Web Apps | static export only; CI verifies `out/` |
+| `http-server-runtime` | Container Apps | container delivery remains explicitly incomplete |
+| `client-only-persistence` | No resource | does not imply shared state |
+| `web-compute` | Container Apps | legacy/general server capability |
 | `transactional-relational` | Postgres Flexible Server | `pgvector` → `vector` extension in-DB |
 | `chat-model` | Azure OpenAI + deployment | model filtered by `approvedModels` |
 | `embeddings` | Azure AI Search | unless `servedBy: pgvector` (stays in Postgres) |

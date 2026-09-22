@@ -137,9 +137,130 @@ test("hosted module cache keys move together for release changes", () => {
   const version = html.match(/bootstrap\.js\?v=([^"]+)/)?.[1];
   assert.ok(version);
   assert.ok(bootstrap.includes(`app.js?v=${version}`));
-  for (const module of ["engine/web-engine", "github"]) {
+  for (const module of ["engine/web-engine", "github", "telemetry"]) {
     assert.ok(app.includes(`${module}.js?v=${version}`));
   }
+});
+
+test("POC telemetry is privacy-bounded and injected as public configuration", () => {
+  const telemetry = source("web/telemetry.js");
+  const pages = source(".github/workflows/pages.yml");
+  const html = source("web/index.html");
+
+  assert.match(telemetry, /SDK_INTEGRITY = "sha384-/);
+  assert.match(telemetry, /ai\.3\.4\.4\.gbl\.min\.js/);
+  assert.match(telemetry, /disableCookiesUsage: true/);
+  assert.match(telemetry, /disableAjaxTracking: true/);
+  assert.match(telemetry, /disableFetchTracking: true/);
+  assert.match(telemetry, /disableExceptionTracking: true/);
+  assert.match(telemetry, /navigator\.doNotTrack/);
+  assert.doesNotMatch(telemetry, /repo(?:sitory)?Name|githubUser|accessToken/);
+
+  assert.match(pages, /APPLICATIONINSIGHTS_CONNECTION_STRING/);
+  assert.match(pages, /releaseSha: process\.env\.GITHUB_SHA/);
+  assert.match(html, /https:\/\/js\.monitor\.azure\.com/);
+  assert.match(html, /https:\/\/\*\.in\.applicationinsights\.azure\.com/);
+  assert.match(html, /excludes GitHub identity/);
+  assert.match(source("infra/telemetry/queries.kql"), /"analysis_started"[\s\S]*"codify_viewed"/);
+  assert.doesNotMatch(
+    source("infra/telemetry/queries.kql").match(/let events[\s\S]*?\];/)?.[0] || "",
+    /github_auth|assumptions_confirmed/,
+  );
+});
+
+test("telemetry runtime sends only allowlisted dimensions and measurements", async () => {
+  const descriptors = new Map(
+    ["window", "document", "navigator", "localStorage", "sessionStorage"].map((key) => [
+      key,
+      Object.getOwnPropertyDescriptor(globalThis, key),
+    ]),
+  );
+  const memoryStorage = () => {
+    const values = new Map<string, string>();
+    return {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    };
+  };
+  const sent: any[] = [];
+  let sdkConfig: Record<string, unknown> | undefined;
+  class FakeApplicationInsights {
+    constructor(options: { config: Record<string, unknown> }) {
+      sdkConfig = options.config;
+    }
+    loadAppInsights() {}
+    trackEvent(event: unknown) {
+      sent.push(event);
+    }
+  }
+
+  try {
+    const localStorage = memoryStorage();
+    const sessionStorage = memoryStorage();
+    const window = {
+      Microsoft: { ApplicationInsights: { ApplicationInsights: FakeApplicationInsights } },
+      doNotTrack: "0",
+      location: { reload() {} },
+    };
+    const document = {
+      createElement: () => ({} as Record<string, unknown>),
+      head: {
+        appendChild(script: { onload?: () => void }) {
+          script.onload?.();
+        },
+      },
+    };
+    for (const [key, value] of Object.entries({
+      window,
+      document,
+      navigator: { doNotTrack: "0" },
+      localStorage,
+      sessionStorage,
+    })) {
+      Object.defineProperty(globalThis, key, { configurable: true, value });
+    }
+
+    const telemetry = await importSource("web/telemetry.js");
+    await telemetry.initializeTelemetry({
+      applicationInsightsConnectionString:
+        "InstrumentationKey=00000000-0000-0000-0000-000000000000;"
+        + "IngestionEndpoint=https://example.in.applicationinsights.azure.com/",
+      releaseSha: "a".repeat(40),
+    });
+    telemetry.trackEvent(
+      "analysis_succeeded",
+      { stage: "review", framework: "next.js", repositoryName: "must-not-leave" },
+      { durationMs: 123.4, resourceCount: 2, arbitraryValue: 99 },
+    );
+
+    assert.equal(sdkConfig?.disableCookiesUsage, true);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].properties.stage, "review");
+    assert.equal(sent[0].properties.framework, "next.js");
+    assert.equal(sent[0].properties.repositoryName, undefined);
+    assert.match(sent[0].properties.anonymousUserId, /^[0-9a-f-]{36}$/i);
+    assert.equal(sent[0].measurements.durationMs, 123);
+    assert.equal(sent[0].measurements.resourceCount, 2);
+    assert.equal(sent[0].measurements.arbitraryValue, undefined);
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete (globalThis as Record<string, unknown>)[key];
+    }
+  }
+});
+
+test("telemetry infrastructure uses workspace-based Application Insights with IP masking", () => {
+  const bicep = source("infra/telemetry/main.bicep");
+  assert.match(bicep, /Microsoft\.OperationalInsights\/workspaces/);
+  assert.match(bicep, /Microsoft\.Insights\/components/);
+  assert.match(bicep, /IngestionMode: 'LogAnalytics'/);
+  assert.match(bicep, /WorkspaceResourceId: workspace\.id/);
+  assert.match(bicep, /DisableIpMasking: false/);
+  assert.match(bicep, /retentionInDays int = 30/);
+  assert.match(bicep, /dailyQuotaGb int = 1/);
+  assert.match(bicep, /workspaceCapping/);
 });
 
 test("Pages documentation does not claim meta CSP prevents framing", () => {

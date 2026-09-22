@@ -39,6 +39,7 @@ jobs:
           GH_OAUTH_CLIENT_ID: ${{ vars.GH_OAUTH_CLIENT_ID }}
           GH_WORKER_URL: ${{ vars.GH_WORKER_URL }}
           GH_SCOPES: ${{ vars.GH_SCOPES }}
+          APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ vars.APPLICATIONINSIGHTS_CONNECTION_STRING }}
         run: |
           node --input-type=module <<'NODE'
           import { writeFileSync } from "node:fs";
@@ -56,8 +57,14 @@ jobs:
             githubClientId: process.env.GH_OAUTH_CLIENT_ID.trim(),
             githubWorkerUrl: worker.origin,
             githubScopes: process.env.GH_SCOPES?.trim() || "repo workflow read:user",
+            applicationInsightsConnectionString:
+              process.env.APPLICATIONINSIGHTS_CONNECTION_STRING?.trim() || "",
+            releaseSha: process.env.GITHUB_SHA,
           };
           writeFileSync("web/config.js", `window.AZX_CONFIG = ${JSON.stringify(config, null, 2)};\n`);
+          console.log(
+            `Anonymous telemetry: ${config.applicationInsightsConnectionString ? "configured" : "disabled"}`,
+          );
           NODE
 
       - name: Write release identity

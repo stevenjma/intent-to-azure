@@ -35,6 +35,7 @@ const TEXT_EXT = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
   ".py", ".sql", ".yml", ".yaml", ".toml", ".json", ".cfg", ".ini", ".txt", ".md",
 ]);
+const NODE_LOCKFILES = new Set(["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"]);
 
 const MAX_FILES = 4000;
 const MAX_BYTES = 256 * 1024;
@@ -68,7 +69,7 @@ function walk(root: string, dir: string, acc: string[]): void {
       const ext = dot >= 0 ? name.slice(dot).toLowerCase() : "";
       const isEnv = name === ".env" || name.startsWith(".env");
       const isDockerfile = name === "Dockerfile" || name.startsWith("Dockerfile");
-      if (TEXT_EXT.has(ext) || isEnv || isDockerfile || name === "Pipfile") {
+      if (TEXT_EXT.has(ext) || NODE_LOCKFILES.has(name) || isEnv || isDockerfile || name === "Pipfile") {
         acc.push(relative(root, abs));
       }
     }
@@ -81,8 +82,19 @@ export function readRepo(root: string): RepoScan {
   walk(root, root, acc);
 
   const files = new Map<string, string>();
+  // Lockfile contents are not scanned; only their presence selects a reproducible
+  // package-manager install. Seed root lockfiles outside the size/file-count caps.
+  for (const lockfile of NODE_LOCKFILES) {
+    try {
+      const st = lstatSync(join(root, lockfile));
+      if (st.isFile() && !st.isSymbolicLink()) files.set(lockfile, "");
+    } catch {
+      // Absent lockfile.
+    }
+  }
   for (const rel of acc) {
     const key = rel.split(sep).join("/"); // forward-slash, machine-independent
+    if (NODE_LOCKFILES.has(key)) continue;
     try {
       const abs = join(root, rel);
       const st = statSync(abs);

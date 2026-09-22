@@ -20,6 +20,9 @@
  * (see SPEC.md §10 "How to add a capability").
  */
 export type KnownCapability =
+  | "static-hostable-frontend"
+  | "http-server-runtime"
+  | "client-only-persistence"
   | "web-compute"
   | "transactional-relational"
   | "chat-model"
@@ -36,6 +39,7 @@ export type CapabilityName = KnownCapability | (string & {});
 
 /** Confidence tiers from the confidence model. */
 export type Confidence = "high" | "medium" | "low";
+export type EvidenceBasis = "observed" | "inferred" | "user-confirmed";
 
 // ---------------------------------------------------------------------------
 // Stage 0 — signals
@@ -109,10 +113,14 @@ export interface Need {
   options?: RelationalOptions & ModelOptions & Record<string, unknown>;
   /** Derived confidence for this need (from the confidence model). */
   confidence: Confidence;
+  /** Whether the capability was observed directly, inferred, or explicitly confirmed. */
+  basis?: EvidenceBasis;
   /** Plain-English justification. */
   rationale: string;
   /** Human-readable summaries of the signals that produced this need. */
   evidence: string[];
+  /** Material assumptions that remain unverified. */
+  assumptions?: string[];
 }
 
 /** Minimal description of the app under inspection. */
@@ -127,6 +135,10 @@ export interface AppInfo {
   language?: string;
   /** Runtime hint (node, python, ...). */
   runtime?: string;
+  /** Package manager selected from the repository lockfile. */
+  packageManager?: "npm" | "pnpm" | "yarn" | "bun";
+  /** Repo-relative lockfile used for immutable CI installs. */
+  lockfile?: string;
 }
 
 /**

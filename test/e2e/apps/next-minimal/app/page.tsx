@@ -4,7 +4,7 @@ export default function Home() {
       <h1>next-minimal</h1>
       <p>
         A stateless Next.js app with no database, model, or storage. azx should
-        detect <code>web-compute</code> only and plan a Container App + managed
+        detect a static-hostable frontend and plan Azure Static Web Apps
         environment.
       </p>
     </main>

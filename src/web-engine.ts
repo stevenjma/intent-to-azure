@@ -21,12 +21,13 @@ export type { ExtractOptions } from "./extract-intent.js";
 
 export { classifyOffer, normalizeBudget, prefersEconomy, describeBudget } from "./budget-core.js";
 
-export { plan, DEFAULT_REGION, slugifyRegion, planNeedsPgPassword } from "./plan.js";
+export { plan, DEFAULT_REGION, HOSTING_POLICY, slugifyRegion, planNeedsPgPassword } from "./plan.js";
 export type { PlanOptions } from "./plan.js";
 
 export {
   buildManagedEnvironment,
   buildWebCompute,
+  buildStaticFrontend,
   buildRelational,
   buildChatModel,
   buildSearch,

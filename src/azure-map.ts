@@ -7,7 +7,8 @@
  * formed {@link AzureResource}s (region + rough cost baked in) that the planner
  * stitches together with `dependsOn` wiring.
  *
- *   web-compute               → Azure Container Apps (fallback: App Service / SWA)
+ *   static-hostable-frontend  → Azure Static Web Apps
+ *   http-server-runtime       → Azure Container Apps
  *   transactional-relational  → Azure Database for PostgreSQL Flexible Server
  *   chat-model                → Azure OpenAI (account + model deployments)
  *   embeddings                → Azure AI Search (unless served by pgvector)
@@ -77,18 +78,33 @@ export function buildWebCompute(need: Need, ctx: MapContext): AzureResource[] {
     type: "Microsoft.App/containerApps",
     service: "Azure Container Apps",
     region: ctx.region,
-    capability: "web-compute",
+    capability: need.capability,
     dependsOn: ctx.envId ? [ctx.envId] : [],
     estimatedMonthlyUsd: ctx.economy ? 15 : 40,
-    notes: [
-      "Fallback options considered: Azure App Service (always-on web apps) or Azure Static Web Apps (static/JAMstack).",
-    ],
+    notes: ["Application image delivery is not generated yet; this resource is infrastructure-only until a container artifact is supplied."],
     properties: {
       ingress: { external: true, targetPort: inferPort(need) },
       scale: ctx.economy ? { minReplicas: 0, maxReplicas: 3 } : { minReplicas: 1, maxReplicas: 10 },
     },
   };
   return [app];
+}
+
+export function buildStaticFrontend(_need: Need, ctx: MapContext): AzureResource[] {
+  return [
+    {
+      id: "web",
+      name: "swa-${appName}",
+      type: "Microsoft.Web/staticSites",
+      service: "Azure Static Web Apps",
+      sku: "Free",
+      region: ctx.region,
+      capability: "static-hostable-frontend",
+      estimatedMonthlyUsd: 0,
+      notes: ["Static export eligibility is inferred; the generated CI build is the verification gate."],
+      properties: { requiredArtifact: "static-directory", outputDirectory: "out" },
+    },
+  ];
 }
 
 export function buildRelational(need: Need, ctx: MapContext): AzureResource[] {

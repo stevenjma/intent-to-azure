@@ -18,9 +18,10 @@
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync, readSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { basename, resolve, join } from "node:path";
+import { basename, resolve, join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 
 import { readRepo, type RepoScan } from "./read-repo.js";
 import { extractIntent } from "./extract-intent.js";
@@ -40,6 +41,7 @@ interface Values {
   json?: boolean;
   guardrails?: string;
   subscription?: string;
+  hosting?: string;
   out?: string;
   scaffold?: string;
   "create-repo"?: string;
@@ -69,6 +71,7 @@ function main(argv: string[]): number {
         json: { type: "boolean" },
         guardrails: { type: "string" },
         subscription: { type: "string" },
+        hosting: { type: "string" },
         out: { type: "string" },
         scaffold: { type: "string" },
         "create-repo": { type: "string" },
@@ -168,10 +171,60 @@ function loadInputs(root: string, values: Values): { guardrails?: Guardrails; bu
 function buildAll(root: string, values: Values): { scan: RepoScan; intent: AppIntent; plan: AzurePlan; bicep: string } {
   const scan = readRepo(root);
   const { guardrails, budget } = loadInputs(root, values);
-  const intent = extractIntent(scan, { guardrails, budget });
+  if (values.hosting !== undefined && values.hosting !== "static" && values.hosting !== "server") {
+    throw new Error(`--hosting must be "static" or "server"`);
+  }
+
+  const intent = extractIntent(scan, {
+    guardrails,
+    budget,
+    ...(values.hosting ? { hostingOverride: values.hosting as "static" | "server" } : {}),
+  });
   const resolved = planIntent(intent, { guardrails, budget });
   const bicep = generateBicep(resolved);
   return { scan, intent, plan: resolved, bicep };
+}
+
+function applicationSource(
+  root: string,
+  plan: AzurePlan,
+): { sourceRepository?: string; sourceRef?: string; sourcePath?: string } {
+  if (!plan.resources.some((resource) => resource.type === "Microsoft.Web/staticSites")) return {};
+
+  const runGit = (args: string[], failure: string): string => {
+    const result = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", shell: false });
+    if (result.error || result.status !== 0) {
+      throw new Error(failure);
+    }
+    return result.stdout.trim();
+  };
+  const repositoryFailure =
+    "Static application delivery requires the analyzed path to be in a clean GitHub repository.";
+  if (runGit(["status", "--porcelain", "--untracked-files=all", "--", "."], repositoryFailure) !== "") {
+    throw new Error(
+      "Static application delivery requires a clean analyzed path so CI can build the exact reviewed commit.",
+    );
+  }
+  const sourceRef = runGit(["rev-parse", "HEAD"], repositoryFailure).toLowerCase();
+  const gitRoot = runGit(["rev-parse", "--show-toplevel"], repositoryFailure);
+  const sourcePath = relative(gitRoot, root).split(sep).join("/") || ".";
+  const remote = runGit(["remote", "get-url", "origin"], repositoryFailure);
+  const match =
+    remote.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i) ??
+    remote.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/i) ??
+    remote.match(/^ssh:\/\/git@github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  if (!match || !/^[0-9a-f]{40}$/.test(sourceRef)) {
+    throw new Error(
+      "Static application delivery requires a GitHub origin remote and an immutable commit SHA.",
+    );
+  }
+  const pushFailure =
+    "Static application delivery requires the analyzed commit to be available on GitHub. Push the commit to origin, then regenerate.";
+  runGit(["fetch", "--quiet", "--prune", "origin"], pushFailure);
+  if (runGit(["branch", "--remotes", "--contains", sourceRef], pushFailure) === "") {
+    throw new Error(pushFailure);
+  }
+  return { sourceRepository: `${match[1]}/${match[2]}`, sourceRef, sourcePath };
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +256,10 @@ function cmdPlan(repoArg: string, values: Values, c: Color): number {
   if (values.scaffold) {
     const target = resolve(values.scaffold);
     assertEmptyOutDir(target);
-    scaffoldFiles = buildScaffold(intent, plan, bicep, { ledger: loadLedger(root) });
+    scaffoldFiles = buildScaffold(intent, plan, bicep, {
+      ledger: loadLedger(root),
+      ...applicationSource(root, plan),
+    });
     writeScaffoldFiles(target, scaffoldFiles);
   }
 
@@ -695,6 +751,7 @@ function cmdShip(repoArg: string, values: Values, c: Color): number {
     deploy: values.deploy,
     outDir: values.out,
     acceptAssumptions: !!values["accept-assumptions"],
+    ...applicationSource(root, plan),
     // Normally `ship` targets via the adopted ledger (or plan defaults) and ignores
     // these flags. Only when RECOVERING from an unreadable ledger do we honor the
     // operator's explicit targeting so the scaffold can still pin the live RG / region
@@ -1117,6 +1174,7 @@ function printUsage(): void {
       "  --json                 machine-readable output",
       "  --guardrails <file>    apply a guardrails.yaml (policy wins over repo)",
       "  --subscription <file>  budget context (mock subscription.json)",
+      "  --hosting <class>      override inferred hosting: static or server",
       "  --against <plan.json>  what-if: baseline plan to diff against (azx plan --json)",
       "  --yes                  approve: what-if apply / up --local-deploy real deploy",
       "  --accept-assumptions   accept confirmation cards that state a concrete default",

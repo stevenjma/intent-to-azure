@@ -167,6 +167,28 @@ input[type="text"]:focus, select:focus { outline: none; border-color: var(--acce
 
 .hidden { display: none !important; }
 
+.foot {
+  display: grid;
+  gap: 8px;
+}
+
+.link-button {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+
+.link-button:disabled {
+  color: var(--muted);
+  cursor: default;
+  text-decoration: none;
+}
+
 /* --- Stage state machine: stepper, stages, review hub, act spokes --- */
 
 .stepper {

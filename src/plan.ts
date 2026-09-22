@@ -17,6 +17,7 @@ import {
   buildObjectStorage,
   buildRelational,
   buildSearch,
+  buildStaticFrontend,
   buildWebCompute,
   type MapContext,
 } from "./azure-map.js";
@@ -47,16 +48,47 @@ export interface PlanOptions extends ClockOptions {
   budget?: BudgetContext;
 }
 
+export const HOSTING_POLICY = [
+  {
+    capability: "static-hostable-frontend",
+    service: "Azure Static Web Apps",
+    requiredArtifact: "static-directory",
+  },
+  {
+    capability: "http-server-runtime",
+    service: "Azure Container Apps",
+    requiredArtifact: "container-image",
+  },
+  {
+    capability: "web-compute",
+    service: "Azure Container Apps",
+    requiredArtifact: "container-image",
+  },
+] as const;
+
+export const STATIC_WEB_APP_REGIONS = new Set([
+  "centralus",
+  "eastasia",
+  "eastus2",
+  "westeurope",
+  "westus2",
+]);
+
 export function plan(intent: AppIntent, opts: PlanOptions = {}): AzurePlan {
   const now = opts.now ?? (() => new Date());
   const guardrails = opts.guardrails ?? intent.guardrails;
   const budget = opts.budget ?? intent.budget;
+  const needs = intent.needs;
 
-  const { region, pinnedByGuardrail } = resolveRegion(guardrails);
+  const { region, pinnedByGuardrail } = resolveRegion(
+    guardrails,
+    needs.some((need) => need.capability === "static-hostable-frontend"),
+  );
   const economy = resolveEconomy(guardrails, budget);
 
-  const needs = intent.needs;
-  const hasCompute = needs.some((n) => n.capability === "web-compute" || n.capability === "background-jobs");
+  const hasCompute = needs.some(
+    (n) => n.capability === "web-compute" || n.capability === "http-server-runtime" || n.capability === "background-jobs",
+  );
   const ctx: MapContext = { region, economy, ...(hasCompute ? { envId: "app-env" } : {}) };
 
   const resources = buildResources(needs, ctx, guardrails);
@@ -94,11 +126,22 @@ export function slugifyRegion(region: string): string {
   return region.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-function resolveRegion(guardrails?: Guardrails): { region: string; pinnedByGuardrail: boolean } {
-  const first = guardrails?.regions?.[0];
+function resolveRegion(
+  guardrails?: Guardrails,
+  requiresStaticWebApps = false,
+): { region: string; pinnedByGuardrail: boolean } {
+  const configured = guardrails?.regions?.map(slugifyRegion).filter(Boolean) ?? [];
+  const first = requiresStaticWebApps
+    ? configured.find((region) => STATIC_WEB_APP_REGIONS.has(region))
+    : configured[0];
   if (first) {
-    const slug = slugifyRegion(first);
-    if (slug) return { region: slug, pinnedByGuardrail: true };
+    return { region: first, pinnedByGuardrail: true };
+  }
+  if (requiresStaticWebApps && configured.length) {
+    throw new Error(
+      `Azure Static Web Apps is unavailable in the allowed regions (${configured.join(", ")}). `
+      + `Allow one of: ${[...STATIC_WEB_APP_REGIONS].join(", ")}.`,
+    );
   }
   return { region: DEFAULT_REGION, pinnedByGuardrail: false };
 }
@@ -117,11 +160,22 @@ function buildResources(needs: Need[], ctx: MapContext, guardrails?: Guardrails)
   const resources: AzureResource[] = [];
   if (ctx.envId) resources.push(buildManagedEnvironment(ctx));
 
+  const selectedHosting = HOSTING_POLICY.find((entry) =>
+    needs.some((need) => need.capability === entry.capability),
+  );
   let searchAdded = false;
   for (const need of needs) {
     switch (need.capability) {
       case "web-compute":
+      case "http-server-runtime":
+        if (selectedHosting?.capability !== need.capability) break;
         resources.push(...buildWebCompute(need, ctx));
+        break;
+      case "static-hostable-frontend":
+        if (selectedHosting?.capability !== need.capability) break;
+        resources.push(...buildStaticFrontend(need, ctx));
+        break;
+      case "client-only-persistence":
         break;
       case "transactional-relational":
         resources.push(...buildRelational(need, ctx));
@@ -200,6 +254,9 @@ function materializeNames(resources: AzureResource[], appName: string): void {
       case "Microsoft.App/containerApps":
       case "Microsoft.App/jobs":
         r.name = clampName(candidate, 32);
+        break;
+      case "Microsoft.Web/staticSites":
+        r.name = withGlobalSuffix(candidate, hash, 60, "-");
         break;
       case "Microsoft.App/managedEnvironments":
         r.name = clampName(candidate, 60);
@@ -365,6 +422,9 @@ function rollUpBudget(
  * future MCP `plan` tool) can carry anything.
  */
 const RESOLVABLE_CAPABILITIES: ReadonlySet<CapabilityName> = new Set<CapabilityName>([
+  "static-hostable-frontend",
+  "http-server-runtime",
+  "client-only-persistence",
   "web-compute",
   "transactional-relational",
   "chat-model",

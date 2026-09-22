@@ -23,10 +23,12 @@ const TEXT_EXT = new Set([
   ".md", ".lock", ".sh", ".dockerfile", ".prisma", ".sql", ".html", ".css",
 ]);
 const INTERESTING = new Set([
-  "package.json", "package-lock.json", "requirements.txt", "pyproject.toml",
+  "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
+  "requirements.txt", "pyproject.toml",
   "Dockerfile", "docker-compose.yml", "docker-compose.yaml", ".env.example",
   "next.config.js", "next.config.mjs", "go.mod", "Gemfile", "pom.xml",
 ]);
+const NODE_LOCKFILES = new Set(["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"]);
 const MAX_FILE_BYTES = 1_500_000;
 const MAX_BLOB_FETCHES = 400;
 
@@ -243,11 +245,20 @@ export async function fetchRepoFiles(ownerRepo, ref, { signal } = {}) {
   const treeSha = branchInfo.commit.commit.tree.sha;
 
   const tree = await gh(`/repos/${owner}/${repo}/git/trees/${treeSha}?recursive=1`, { signal });
+  const treeNodes = tree.tree || [];
   const blobs = (tree.tree || []).filter(
-    (n) => n.type === "blob" && wantFile(n.path, n.size ?? 0),
+    (n) => n.type === "blob"
+      && !NODE_LOCKFILES.has(n.path)
+      && wantFile(n.path, n.size ?? 0),
   );
 
-  const files = new Map();
+  // Lockfile contents are irrelevant to detection. Preserve root lockfile presence
+  // without downloading it or charging it against bounded blob fetches.
+  const files = new Map(
+    treeNodes
+      .filter((n) => n.type === "blob" && NODE_LOCKFILES.has(n.path))
+      .map((n) => [n.path, ""]),
+  );
   let fetches = 0;
   let truncated = Boolean(tree.truncated);
   for (const node of blobs) {
@@ -261,7 +272,15 @@ export async function fetchRepoFiles(ownerRepo, ref, { signal } = {}) {
       blob.encoding === "base64" ? decodeBase64Utf8(blob.content) : blob.content ?? "";
     files.set(node.path, contents);
   }
-  return { owner, repo, files, defaultBranch: meta.default_branch, branch, truncated };
+  return {
+    owner,
+    repo,
+    files,
+    defaultBranch: meta.default_branch,
+    branch,
+    commitSha: branchInfo.commit.sha,
+    truncated,
+  };
 }
 
 function decodeBase64Utf8(b64) {

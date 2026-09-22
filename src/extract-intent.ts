@@ -26,10 +26,15 @@ export interface ExtractOptions extends ClockOptions {
   guardrails?: Guardrails;
   /** Optional budget context to embed in the intent. */
   budget?: BudgetContext;
+  /** Explicit hosting-class override for ambiguous or externally confirmed cases. */
+  hostingOverride?: "static" | "server";
 }
 
 /** Deterministic capability ordering for stable output. */
 const CAPABILITY_ORDER: CapabilityName[] = [
+  "static-hostable-frontend",
+  "http-server-runtime",
+  "client-only-persistence",
   "web-compute",
   "transactional-relational",
   "chat-model",
@@ -55,6 +60,7 @@ export function extractIntent(scan: RepoScan, opts: ExtractOptions = {}): AppInt
   }
 
   postProcessVectorStore(needs);
+  postProcessHosting(needs, opts.hostingOverride);
   needs.sort((a, b) => capRank(a.capability) - capRank(b.capability) || a.capability.localeCompare(b.capability));
 
   const confirmations = buildConfirmations(needs);
@@ -89,8 +95,13 @@ function buildNeed(capability: CapabilityName, signals: Signal[]): Need {
     capability,
     ...(Object.keys(options).length ? { options } : {}),
     confidence,
+    basis: capability === "static-hostable-frontend" ? "inferred" : "observed",
     rationale,
     evidence,
+    assumptions:
+      capability === "static-hostable-frontend"
+        ? ["Static export eligibility is inferred from repository signals and must be verified by the CI build."]
+        : [],
   };
 }
 
@@ -110,6 +121,10 @@ function mergeOptions(signals: Signal[]): Record<string, unknown> {
     if (d.engine) options.engine = d.engine;
     if (d.branching) options.branching = true;
     if (d.consistency) options.consistency = d.consistency;
+    if (d.requiredArtifact) options.requiredArtifact = d.requiredArtifact;
+    if (d.persistence) options.persistence = d.persistence;
+    if (d.hostingAmbiguity) options.hostingAmbiguity = true;
+    if (d.staticExportDisqualifier) options.staticExportDisqualifier = d.staticExportDisqualifier;
     if (typeof d.provider === "string" && provider === undefined) provider = d.provider;
     if (Array.isArray(d.models)) for (const m of d.models) models.add(String(m));
   }
@@ -119,6 +134,42 @@ function mergeOptions(signals: Signal[]): Record<string, unknown> {
   return options;
 }
 
+function postProcessHosting(needs: Need[], override?: "static" | "server"): void {
+  if (override) {
+    for (let i = needs.length - 1; i >= 0; i--) {
+      if (["static-hostable-frontend", "http-server-runtime", "web-compute"].includes(needs[i]!.capability)) {
+        needs.splice(i, 1);
+      }
+    }
+    const capability = override === "static" ? "static-hostable-frontend" : "http-server-runtime";
+    needs.push({
+      capability,
+      confidence: "high",
+      basis: "user-confirmed",
+      rationale: `Hosting class explicitly overridden to ${override}.`,
+      evidence: [`Explicit hosting override: ${override}`],
+      assumptions:
+        override === "static"
+          ? ["Static export must still be verified by the generated CI build."]
+          : ["A deployable application container image must be supplied."],
+      options: { requiredArtifact: override === "static" ? "static-directory" : "container-image" },
+    });
+    return;
+  }
+  const server = needs.find((n) => n.capability === "http-server-runtime");
+  const staticIndex = needs.findIndex((n) => n.capability === "static-hostable-frontend");
+  if (server && staticIndex >= 0) needs.splice(staticIndex, 1);
+  const genericCompute = needs.findIndex((n) => n.capability === "web-compute");
+  if ((server || staticIndex >= 0) && genericCompute >= 0) needs.splice(genericCompute, 1);
+  const hosting = server ?? needs.find((n) => n.capability === "static-hostable-frontend");
+  if (hosting) {
+    hosting.options = {
+      ...(hosting.options ?? {}),
+      requiredArtifact: server ? "container-image" : "static-directory",
+    };
+  }
+}
+
 function buildRationale(capability: CapabilityName, signals: Signal[], confidence: Confidence): string {
   const kinds = [...new Set(signals.map((s) => s.kind))].sort();
   const kindPhrase =
@@ -126,6 +177,9 @@ function buildRationale(capability: CapabilityName, signals: Signal[], confidenc
       ? `${kinds.length} independent signals (${kinds.join(", ")})`
       : `a single ${kinds[0] ?? "unknown"} signal`;
   const conclusion = signals[0]?.conclusion ?? capability;
+  if (capability === "http-server-runtime" && signals.some((signal) => signal.detail?.staticExportDisqualifier)) {
+    return `${conclusion}: an explicit static-export disqualifier requires server compute, so it is applied without asking.`;
+  }
   const tail =
     confidence === "high"
       ? "corroborated across signal kinds, so it is applied without asking."
@@ -158,6 +212,9 @@ function postProcessVectorStore(needs: Need[]): void {
 // ---------------------------------------------------------------------------
 
 const CONFIRM_QUESTION: Record<string, string> = {
+  "static-hostable-frontend": "Treat this application as a static-export candidate?",
+  "http-server-runtime": "Deploy the observed HTTP server runtime?",
+  "client-only-persistence": "Keep browser-local persistence without provisioning shared state?",
   "web-compute": "Deploy this app as web-compute on Azure Container Apps?",
   "transactional-relational": "Provision an Azure Database for PostgreSQL Flexible Server?",
   "chat-model": "Wire up Azure OpenAI to serve the chat-model usage?",
@@ -190,6 +247,21 @@ function buildConfirmations(needs: Need[]): Confirmation[] {
   }
 
   for (const need of needs) {
+    if (need.capability === "client-only-persistence") continue;
+    if (need.capability === "http-server-runtime") continue;
+    if (need.capability === "static-hostable-frontend") {
+      if (need.options?.hostingAmbiguity !== true) continue;
+      confirmations.push({
+        id: "hosting:static-export",
+        capability: need.capability,
+        question: "Do the configured rewrites or redirects require runtime request handling?",
+        confidence: "medium",
+        why: "The routing configuration is ambiguous and the answer changes Static Web Apps versus server compute.",
+        options: ["No, they are static-compatible", "Yes, they require a server"],
+        assumption: "No, they are static-compatible",
+      });
+      continue;
+    }
     if (need.confidence === "high") continue;
 
     // Embeddings without a resolved store is a genuine either/or question.

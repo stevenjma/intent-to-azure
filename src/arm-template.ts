@@ -109,6 +109,8 @@ function skuFor(r: AzureResource): Record<string, unknown> | undefined {
       return { name: r.sku ?? "basic" };
     case "Microsoft.Storage/storageAccounts":
       return { name: r.sku ?? "Standard_LRS" };
+    case "Microsoft.Web/staticSites":
+      return { name: r.sku ?? "Free", tier: r.sku ?? "Free" };
     case "Microsoft.CognitiveServices/accounts/deployments":
       return { name: "Standard", capacity: numProp(r, "capacityK", 10) };
     default:
@@ -128,6 +130,8 @@ function propertiesFor(
 ): Record<string, unknown> | undefined {
   switch (r.type) {
     case "Microsoft.App/managedEnvironments":
+      return {};
+    case "Microsoft.Web/staticSites":
       return {};
     case "Microsoft.App/containerApps": {
       const port = numDeep(r, ["ingress", "targetPort"], 3000);

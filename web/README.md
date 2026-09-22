@@ -50,6 +50,7 @@ Azure      ◀──OIDC── what-if → production approval → deployment   
    - `GH_OAUTH_CLIENT_ID`
    - `GH_WORKER_URL`
    - `GH_SCOPES` (optional; default `repo workflow read:user`)
+   - `APPLICATIONINSIGHTS_CONNECTION_STRING` (optional; enables anonymous POC telemetry)
 5. Push to `main`. [`pages.yml`](../.github/workflows/pages.yml) builds the engine
    and generates `web/config.js`.
 
@@ -72,8 +73,10 @@ URL for GitHub sign-in.
 
 The page may hold a live GitHub token, so XSS is the primary browser risk.
 
-- The CSP allows scripts only from `self`; Azure/MSAL and ARM endpoints are not in
-  the hosted runtime surface.
+- The CSP allows application scripts from `self`; Azure/MSAL and ARM endpoints are
+  not in the hosted runtime surface. When telemetry is configured, the page loads
+  the Microsoft Application Insights SDK from `js.monitor.azure.com` with a pinned
+  Subresource Integrity hash and connects only to Azure Monitor ingestion.
 - The GitHub token is memory-only. Bootstrap validates OAuth state and removes the
   URL fragment before loading application modules, so reload requires sign-in again.
 - OAuth return URLs are pinned to the exact configured application origin and path.
@@ -82,13 +85,36 @@ The page may hold a live GitHub token, so XSS is the primary browser risk.
 - The Worker sees the GitHub token only during exchange and must not store, log, or
   forward it. Its client secret stays in Worker secret storage.
 
+## POC telemetry
+
+Optional telemetry uses workspace-based Application Insights and Log Analytics. Deploy
+[`infra/telemetry/main.bicep`](../infra/telemetry/main.bicep), then set its public
+`connectionString` output as the `APPLICATIONINSIGHTS_CONNECTION_STRING` repository
+variable. The Pages workflow injects it into `web/config.js`.
+
+The custom event payload contains only funnel stages, durations, coarse
+framework/hosting categories, resource and confirmation counts, failure codes, a
+random browser identifier, a per-tab session identifier, and the release SHA. It does
+not send GitHub identity, repository names or URLs, source content, intent evidence,
+access tokens, or error messages. Cookies, automatic page views, dependency tracking,
+route tracking, and exception collection are disabled. Azure Monitor may add its
+standard browser/device and coarse location context; IP masking remains enabled.
+
+The footer provides an opt-out stored in the browser and deletes the pseudonymous
+identifiers when collection is disabled. `Do Not Track` disables collection
+automatically. The deployment defaults to 30-day retention and caps ingestion at
+1 GB/day because the public connection string is an ingestion identifier rather than
+an authentication credential. Use
+[`infra/telemetry/queries.kql`](../infra/telemetry/queries.kql) for the initial funnel,
+reliability, repeat-browser, and planning-quality views.
+
 ### Clickjacking headers
 
 The meta CSP in `index.html` cannot enforce `frame-ancestors`. GitHub Pages cannot
 set repository-defined response headers. On a configurable host, set:
 
 ```text
-Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://api.github.com https://github.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; upgrade-insecure-requests
+Content-Security-Policy: default-src 'none'; script-src 'self' https://js.monitor.azure.com; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://api.github.com https://github.com https://*.in.applicationinsights.azure.com https://dc.services.visualstudio.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; upgrade-insecure-requests
 ```
 
 `X-Frame-Options: DENY` is an appropriate legacy fallback. These must be real HTTP

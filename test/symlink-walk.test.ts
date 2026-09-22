@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -47,5 +47,43 @@ test("walk() skips symlinks and never scans outside the root", (t) => {
     );
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("readRepo includes Yarn and Bun lockfiles used by static delivery", () => {
+  for (const lockfile of ["yarn.lock", "bun.lock", "bun.lockb"]) {
+    const root = mkdtempSync(join(tmpdir(), "azx-lockfile-"));
+    try {
+      writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify({ name: "lockfile-fixture", dependencies: { next: "15.0.0" } }),
+        "utf8",
+      );
+      writeFileSync(join(root, lockfile), "", "utf8");
+      const scan = readRepo(root);
+      assert.equal(scan.app.lockfile, lockfile);
+      assert.equal(scan.app.packageManager, lockfile === "yarn.lock" ? "yarn" : "bun");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("readRepo preserves lockfile presence above the text scan size limit", () => {
+  const root = mkdtempSync(join(tmpdir(), "azx-large-lockfile-"));
+  try {
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ name: "large-lockfile-fixture", dependencies: { next: "15.0.0" } }),
+      "utf8",
+    );
+    const lockfile = join(root, "yarn.lock");
+    writeFileSync(lockfile, "", "utf8");
+    truncateSync(lockfile, 300 * 1024);
+    const scan = readRepo(root);
+    assert.equal(scan.app.lockfile, "yarn.lock");
+    assert.equal(scan.app.packageManager, "yarn");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
